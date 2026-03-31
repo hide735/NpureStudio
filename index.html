@@ -1,31 +1,35 @@
 <!DOCTYPE html>
-<html>
+<html lang="ja">
 <head>
-    <title>NpureStudio - WebGPU Test</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NpureStudio - AI画像編集</title>
+    <link rel="stylesheet" href="src/styles.css">
 </head>
 <body>
-    <h1>NpureStudio WebGPU Check</h1>
-    <div id="status">Checking WebGPU support...</div>
+    <header>
+        <h1>NpureStudio</h1>
+        <nav>
+            <button id="try-on-btn">試着</button>
+            <button id="generate-btn">生成</button>
+        </nav>
+    </header>
 
-    <script>
-        async function checkWebGPU() {
-            const statusDiv = document.getElementById('status');
-            if (!navigator.gpu) {
-                statusDiv.innerHTML = "❌ WebGPU is NOT supported in this browser.";
-                statusDiv.style.color = "red";
-                return;
-            }
+    <main>
+        <div id="canvas-container">
+            <canvas id="main-canvas"></canvas>
+        </div>
+        <div id="controls">
+            <input type="file" id="image-upload" accept="image/*" multiple>
+            <button id="process-btn">処理開始</button>
+        </div>
+        <div id="status">準備完了</div>
+    </main>
 
-            const adapter = await navigator.gpu.requestAdapter();
-            if (adapter) {
-                statusDiv.innerHTML = "✅ WebGPU is supported! Your iPhone NPU is ready.";
-                statusDiv.style.color = "green";
-                console.log("Adapter info:", adapter);
-            } else {
-                statusDiv.innerHTML = "❌ WebGPU supported, but no adapter found.";
-            }
-        }
-        checkWebGPU();
-    </script>
+    <footer>
+        <p>iPhone NPU 搭載 AI画像編集アプリ</p>
+    </footer>
+
+    <script src="src/app.js"></script>
 </body>
 </html>
