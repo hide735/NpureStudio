@@ -1,3 +1,5 @@
+import { initTransformers } from './core/transformers.js';
+
 // NpureStudio メインアプリ
 class NpureStudio {
     constructor() {
@@ -12,10 +14,19 @@ class NpureStudio {
         this.init();
     }
 
-    init() {
+    async init() {
         this.setupCanvas();
         this.setupEventListeners();
-        this.checkWebGPU();
+
+        if (await this.checkWebGPU()) {
+            try {
+                await initTransformers();
+                this.updateStatus('Transformers.js 初期化に成功しました', 'success');
+            } catch (err) {
+                this.updateStatus('Transformers.js 初期化失敗: ' + err.message, 'error');
+            }
+        }
+
         this.updateStatus('アプリが初期化されました');
     }
 
