@@ -2,6 +2,7 @@
 import * as transformers from '../assets/transformers.min.js';
 import { initImageRecognition, classifyImage, isInitialized } from './features/image-recognition.js';
 import { initSegmentation, generateMask } from './features/segmentation.js';
+import { initInpainting, performInpainting } from './features/inpainting.js';
 
 // NpureStudio メインアプリ
 class NpureStudio {
@@ -11,13 +12,16 @@ class NpureStudio {
         this.maskCanvas = document.getElementById('mask-canvas');
         this.maskCtx = this.maskCanvas.getContext('2d');
         this.statusDiv = document.getElementById('status');
-        this.imageUpload = document.getElementById('image-upload');
-        this.processBtn = document.getElementById('process-btn');
+        this.personUpload = document.getElementById('person-upload');
+        this.clothUpload = document.getElementById('cloth-upload');
         this.segmentBtn = document.getElementById('segment-btn');
         this.tryOnBtn = document.getElementById('try-on-btn');
-        this.generateBtn = document.getElementById('generate-btn');
+        this.resetBtn = document.getElementById('reset-btn');
+        this.inpaintPrompt = document.getElementById('inpaint-prompt');
 
-        this.currentImage = null;
+        this.personImage = null;
+        this.clothImage = null;
+        this.personMaskImageData = null;
 
         this.init();
     }
@@ -71,11 +75,11 @@ class NpureStudio {
     }
 
     setupEventListeners() {
-        this.imageUpload.addEventListener('change', (e) => this.handleImageUpload(e));
-        this.processBtn.addEventListener('click', () => this.processImage());
+        this.personUpload.addEventListener('change', (e) => this.handlePersonUpload(e));
+        this.clothUpload.addEventListener('change', (e) => this.handleClothUpload(e));
         this.segmentBtn.addEventListener('click', () => this.performSegmentation());
-        this.tryOnBtn.addEventListener('click', () => this.switchToTryOn());
-        this.generateBtn.addEventListener('click', () => this.switchToGenerate());
+        this.tryOnBtn.addEventListener('click', () => this.performTryOn());
+        this.resetBtn.addEventListener('click', () => this.resetApp());
     }
 
     async checkWebGPU() {
@@ -99,34 +103,51 @@ class NpureStudio {
         }
     }
 
-    async handleImageUpload(event) {
+    async handlePersonUpload(event) {
         const files = event.target.files;
-        if (files.length > 0) {
-            const file = files[0];
-            const reader = new FileReader();
-            reader.onload = async (e) => {
-                const img = new Image();
-                img.onload = async () => {
-                    this.currentImage = img;
-                    this.drawImage(img);
-                    this.clearMask();
-                    this.updateStatus('画像を読み込みました');
+        if (!files || files.length === 0) return;
 
-                    // 画像認識を実行
-                    if (isInitialized()) {
-                        try {
-                            this.updateStatus('画像を分析中...');
-                            const results = await classifyImage(img, transformers);
-                            this.displayClassificationResults(results);
-                        } catch (error) {
-                            this.updateStatus('画像分析に失敗しました: ' + error.message, 'error');
-                        }
+        const file = files[0];
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+            const img = new Image();
+            img.onload = async () => {
+                this.personImage = img;
+                this.drawImage(img);
+                this.clearMask();
+                this.personMaskImageData = null;
+                this.updateStatus('人物画像を読み込みました');
+
+                if (isInitialized()) {
+                    try {
+                        this.updateStatus('人物画像を分析中...');
+                        const results = await classifyImage(img, transformers);
+                        this.displayClassificationResults(results);
+                    } catch (error) {
+                        this.updateStatus('画像分析に失敗しました: ' + error.message, 'error');
                     }
-                };
-                img.src = e.target.result;
+                }
             };
-            reader.readAsDataURL(file);
-        }
+            img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
+    }
+
+    async handleClothUpload(event) {
+        const files = event.target.files;
+        if (!files || files.length === 0) return;
+
+        const file = files[0];
+        const reader = new FileReader();
+        reader.onload = async (e) => {
+            const img = new Image();
+            img.onload = async () => {
+                this.clothImage = img;
+                this.updateStatus('衣服画像を読み込みました');
+            };
+            img.src = e.target.result;
+        };
+        reader.readAsDataURL(file);
     }
 
     drawImage(img) {
@@ -156,19 +177,170 @@ class NpureStudio {
     }
 
     async performSegmentation() {
-        if (!this.currentImage) {
-            this.updateStatus('画像を選択してください', 'error');
+        if (!this.personImage) {
+            this.updateStatus('人物画像を選択してください', 'error');
             return;
         }
 
         try {
-            this.updateStatus('セグメンテーションを実行中...');
-            const result = await generateMask(this.currentImage, transformers);
+            this.updateStatus('人物セグメンテーションを実行中...');
+            const result = await generateMask(this.personImage, transformers);
             this.drawMask(result);
+            this.personMaskImageData = this.buildMaskImageData(result);
             this.updateStatus('セグメンテーション完了', 'success');
         } catch (error) {
             this.updateStatus('セグメンテーション失敗: ' + error.message, 'error');
         }
+    }
+
+    async performTryOn() {
+        if (!this.personImage) {
+            this.updateStatus('人物画像を選択してください', 'error');
+            return;
+        }
+        if (!this.clothImage) {
+            this.updateStatus('衣服画像を選択してください', 'error');
+            return;
+        }
+        if (!this.personMaskImageData) {
+            this.updateStatus('まずセグメンテーションを実行してください', 'error');
+            return;
+        }
+
+        const prompt = this.inpaintPrompt.value || `Try on clothing from reference image.`;
+
+        try {
+            this.updateStatus('試着（インペイント）を実行中...');
+
+            // 衣服画像をプロンプトに追加してスタイルを反映（簡易対応）
+            const stylePrompt = `${prompt} Wear clothes matching the reference garment.`;
+
+            const inpaintResult = await performInpainting(this.personImage, this.personMaskImageData, stylePrompt, transformers);
+
+            if (inpaintResult instanceof HTMLImageElement) {
+                this.drawImage(inpaintResult);
+            } else if (inpaintResult instanceof ImageData) {
+                const outputCanvas = document.createElement('canvas');
+                outputCanvas.width = inpaintResult.width;
+                outputCanvas.height = inpaintResult.height;
+                const outputCtx = outputCanvas.getContext('2d');
+                outputCtx.putImageData(inpaintResult, 0, 0);
+                this.drawImage(outputCanvas);
+            } else if (inpaintResult instanceof HTMLCanvasElement) {
+                this.drawImage(inpaintResult);
+            } else {
+                this.updateStatus('試着結果が予期しない形式です', 'error');
+                return;
+            }
+
+            this.updateStatus('試着完了', 'success');
+        } catch (error) {
+            // HFトークン未設定などで401/403になる環境では、簡易なローカル合成にフォールバック
+            console.warn('Inpainting failed, falling back to compositing:', error);
+
+            try {
+                const overlayCanvas = this.simpleTryOn(this.personImage, this.clothImage, this.personMaskImageData);
+                this.drawImage(overlayCanvas);
+                this.updateStatus('試着完了（フォールバック合成）', 'success');
+            } catch (composeError) {
+                this.updateStatus('試着失敗: ' + (composeError.message || error.message), 'error');
+            }
+        }
+    }
+
+    resetApp() {
+        this.personImage = null;
+        this.clothImage = null;
+        this.personMaskImageData = null;
+        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        this.maskCtx.clearRect(0, 0, this.maskCanvas.width, this.maskCanvas.height);
+        this.updateStatus('リセット完了: 画像とマスクをクリアしました', 'info');
+    }
+
+    simpleTryOn(personImage, clothImage, maskImageData) {
+        const baseCanvas = document.createElement('canvas');
+        baseCanvas.width = personImage.width;
+        baseCanvas.height = personImage.height;
+        const baseCtx = baseCanvas.getContext('2d');
+        baseCtx.drawImage(personImage, 0, 0, baseCanvas.width, baseCanvas.height);
+
+        const clothCanvas = document.createElement('canvas');
+        clothCanvas.width = baseCanvas.width;
+        clothCanvas.height = baseCanvas.height;
+        const clothCtx = clothCanvas.getContext('2d');
+
+        // 衣服画像を人物サイズにフィット（アスペクト比維持）
+        const clothRatio = clothImage.width / clothImage.height;
+        const targetRatio = clothCanvas.width / clothCanvas.height;
+        let cw, ch, cx, cy;
+        if (clothRatio > targetRatio) {
+            cw = clothCanvas.width;
+            ch = cw / clothRatio;
+            cx = 0;
+            cy = (clothCanvas.height - ch) / 2;
+        } else {
+            ch = clothCanvas.height;
+            cw = ch * clothRatio;
+            cx = (clothCanvas.width - cw) / 2;
+            cy = 0;
+        }
+        clothCtx.drawImage(clothImage, cx, cy, cw, ch);
+
+        // マスクを利用して衣服領域を切り抜き
+        const maskCanvas = document.createElement('canvas');
+        maskCanvas.width = maskImageData.width;
+        maskCanvas.height = maskImageData.height;
+        const maskCtx = maskCanvas.getContext('2d');
+        maskCtx.putImageData(maskImageData, 0, 0);
+
+        const maskedClothCanvas = document.createElement('canvas');
+        maskedClothCanvas.width = baseCanvas.width;
+        maskedClothCanvas.height = baseCanvas.height;
+        const maskedClothCtx = maskedClothCanvas.getContext('2d');
+
+        maskedClothCtx.drawImage(clothCanvas, 0, 0);
+        maskedClothCtx.globalCompositeOperation = 'destination-in';
+        maskedClothCtx.drawImage(maskCanvas, 0, 0, baseCanvas.width, baseCanvas.height);
+
+        baseCtx.globalCompositeOperation = 'source-over';
+        baseCtx.drawImage(maskedClothCanvas, 0, 0);
+
+        return baseCanvas;
+    }
+
+    buildMaskImageData(result) {
+        if (!result || !result.length) {
+            return null;
+        }
+
+        const width = result[0].mask.width;
+        const height = result[0].mask.height;
+        const combinedMask = new Float32Array(width * height);
+
+        for (const segment of result) {
+            const segmentMask = segment.mask;
+            if (!segmentMask || !segmentMask.data) continue;
+            for (let i = 0; i < segmentMask.data.length; i++) {
+                combinedMask[i] = Math.max(combinedMask[i], segmentMask.data[i]);
+            }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        const imageData = ctx.createImageData(width, height);
+
+        for (let i = 0; i < combinedMask.length; i++) {
+            const alphaValue = Math.round(Math.min(1, combinedMask[i]) * 255);
+            imageData.data[i * 4] = 255;
+            imageData.data[i * 4 + 1] = 255;
+            imageData.data[i * 4 + 2] = 255;
+            imageData.data[i * 4 + 3] = alphaValue;
+        }
+        ctx.putImageData(imageData, 0, 0);
+
+        return ctx.getImageData(0, 0, width, height);
     }
 
     drawMask(result) {

@@ -9,10 +9,7 @@
 <body>
     <header>
         <h1>NpureStudio</h1>
-        <nav>
-            <button id="try-on-btn">試着</button>
-            <button id="generate-btn">生成</button>
-        </nav>
+        <p class="header-note">ステップ1: 人物写真と衣服写真を読み込む、ステップ2: セグメンテーション、ステップ3: 試着</p>
     </header>
 
     <main>
@@ -21,9 +18,12 @@
             <canvas id="mask-canvas"></canvas>
         </div>
         <div id="controls">
-            <input type="file" id="image-upload" accept="image/*" multiple>
-            <button id="segment-btn">セグメンテーション</button>
-            <button id="process-btn">処理開始</button>
+            <label>人物写真<input type="file" id="person-upload" accept="image/*"></label>
+            <label>衣服写真<input type="file" id="cloth-upload" accept="image/*"></label>
+            <input type="text" id="inpaint-prompt" placeholder="Inpainting prompt (例: スタイリッシュなジャケット)" />
+            <button id="segment-btn">1) セグメンテーション</button>
+            <button id="try-on-btn">2) 試着</button>
+            <button id="reset-btn">リセット</button>
         </div>
         <div id="status">準備完了</div>
     </main>

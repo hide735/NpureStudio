@@ -6,12 +6,35 @@ let inpainter = null;
 export async function initInpainting(transformers) {
     if (!inpainter) {
         console.log("Loading Stable Diffusion Inpainting model...");
-        // WebGPUが利用可能なら使用、そうでなければCPU
         const device = navigator.gpu ? 'webgpu' : 'cpu';
         console.log(`Using device: ${device}`);
-        inpainter = await transformers.pipeline('text-to-image', 'Xenova/stable-diffusion-2-inpainting', {
-            device: device
-        });
+
+        const modelCandidates = [
+            'Xenova/stable-diffusion-inpainting',
+            'Xenova/stable-diffusion-1.5-inpainting',
+            'Xenova/stable-diffusion-2-inpainting',
+            'Xenova/stable-diffusion-v1-5' // 後段フォールバック
+        ];
+
+        let lastError = null;
+        for (const model of modelCandidates) {
+            try {
+                console.log(`Trying model: ${model}`);
+                inpainter = await transformers.pipeline('image-to-image', model, {
+                    device: device
+                });
+                console.log(`Loaded inpainting model: ${model}`);
+                break;
+            } catch (err) {
+                console.warn(`Failed to load model ${model}:`, err.message || err);
+                lastError = err;
+            }
+        }
+
+        if (!inpainter) {
+            const message = lastError?.message || 'モデルのロードに失敗しました';
+            throw new Error(`Inpaintingモデルの初期化に失敗しました: ${message}`);
+        }
     }
     return inpainter;
 }

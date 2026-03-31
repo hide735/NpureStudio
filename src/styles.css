@@ -28,9 +28,14 @@ header h1 {
     color: #007aff;
 }
 
+.header-note {
+    font-size: 0.9rem;
+    color: #666;
+    margin-top: 0.5rem;
+}
+
 nav {
-    display: flex;
-    gap: 0.5rem;
+    display: none;
 }
 
 button {
