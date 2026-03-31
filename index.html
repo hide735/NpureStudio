@@ -18,9 +18,11 @@
     <main>
         <div id="canvas-container">
             <canvas id="main-canvas"></canvas>
+            <canvas id="mask-canvas"></canvas>
         </div>
         <div id="controls">
             <input type="file" id="image-upload" accept="image/*" multiple>
+            <button id="segment-btn">セグメンテーション</button>
             <button id="process-btn">処理開始</button>
         </div>
         <div id="status">準備完了</div>
@@ -29,6 +31,8 @@
     <footer>
         <p>iPhone NPU 搭載 AI画像編集アプリ</p>
     </footer>
+
+    <!-- Transformers.js is imported in app.js -->
 
     <script type="module" src="src/app.js"></script>
 </body>
