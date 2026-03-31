@@ -18,7 +18,6 @@ class NpureStudio {
         this.generateBtn = document.getElementById('generate-btn');
 
         this.currentImage = null;
-        this.segmentationPoints = [];
 
         this.init();
     }
@@ -75,7 +74,6 @@ class NpureStudio {
         this.imageUpload.addEventListener('change', (e) => this.handleImageUpload(e));
         this.processBtn.addEventListener('click', () => this.processImage());
         this.segmentBtn.addEventListener('click', () => this.performSegmentation());
-        this.canvas.addEventListener('click', (e) => this.handleCanvasClick(e));
         this.tryOnBtn.addEventListener('click', () => this.switchToTryOn());
         this.generateBtn.addEventListener('click', () => this.switchToGenerate());
     }
@@ -110,7 +108,6 @@ class NpureStudio {
                 const img = new Image();
                 img.onload = async () => {
                     this.currentImage = img;
-                    this.segmentationPoints = []; // 新しい画像でポイントをリセット
                     this.drawImage(img);
                     this.clearMask();
                     this.updateStatus('画像を読み込みました');
@@ -156,44 +153,17 @@ class NpureStudio {
 
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(img, offsetX, offsetY, drawWidth, drawHeight);
-
-        // セグメンテーションポイントを再描画
-        this.drawSegmentationPoints();
-    }
-
-    handleCanvasClick(event) {
-        if (!this.currentImage) return;
-
-        const rect = this.canvas.getBoundingClientRect();
-        const scaleX = this.canvas.width / rect.width;
-        const scaleY = this.canvas.height / rect.height;
-
-        const x = (event.clientX - rect.left) * scaleX;
-        const y = (event.clientY - rect.top) * scaleY;
-
-        this.segmentationPoints.push({ x, y, label: 1 });
-        this.drawSegmentationPoints();
-        this.updateStatus(`ポイントを追加しました (${this.segmentationPoints.length}点)`);
-    }
-
-    drawSegmentationPoints() {
-        this.ctx.fillStyle = 'red';
-        this.segmentationPoints.forEach(point => {
-            this.ctx.beginPath();
-            this.ctx.arc(point.x, point.y, 5, 0, 2 * Math.PI);
-            this.ctx.fill();
-        });
     }
 
     async performSegmentation() {
-        if (!this.currentImage || this.segmentationPoints.length === 0) {
-            this.updateStatus('画像とポイントを選択してください', 'error');
+        if (!this.currentImage) {
+            this.updateStatus('画像を選択してください', 'error');
             return;
         }
 
         try {
             this.updateStatus('セグメンテーションを実行中...');
-            const result = await generateMask(this.currentImage, this.segmentationPoints, transformers);
+            const result = await generateMask(this.currentImage, transformers);
             this.drawMask(result);
             this.updateStatus('セグメンテーション完了', 'success');
         } catch (error) {
@@ -207,30 +177,58 @@ class NpureStudio {
             return;
         }
 
-        const mask = result[0]; // 最初のマスクを使用
-        const maskData = mask.mask; // image-segmentation の場合 mask.mask
-
-        // マスクデータをリサイズしてキャンバスにフィット
-        const maskCanvas = document.createElement('canvas');
-        const maskCtx = maskCanvas.getContext('2d');
-        maskCanvas.width = maskData.width;
-        maskCanvas.height = maskData.height;
-
-        // マスクデータをImageDataに変換
-        const imageData = maskCtx.createImageData(maskData.width, maskData.height);
-        for (let i = 0; i < maskData.data.length; i++) {
-            const value = maskData.data[i] * 255;
-            imageData.data[i * 4] = value;     // R
-            imageData.data[i * 4 + 1] = value; // G
-            imageData.data[i * 4 + 2] = value; // B
-            imageData.data[i * 4 + 3] = 128;   // A (半透明)
-        }
-
-        maskCtx.putImageData(imageData, 0, 0);
-
-        // マスクをメインキャンバスにスケーリングして描画
         this.maskCtx.clearRect(0, 0, this.maskCanvas.width, this.maskCanvas.height);
-        this.maskCtx.drawImage(maskCanvas, 0, 0, this.maskCanvas.width, this.maskCanvas.height);
+
+        // 各セグメントのマスクを描画
+        result.forEach((segment, index) => {
+            const maskData = segment.mask;
+
+            // マスクデータをリサイズしてキャンバスにフィット
+            const maskCanvas = document.createElement('canvas');
+            const maskCtx = maskCanvas.getContext('2d');
+            maskCanvas.width = maskData.width;
+            maskCanvas.height = maskData.height;
+
+            // マスクデータをImageDataに変換
+            const imageData = maskCtx.createImageData(maskData.width, maskData.height);
+            for (let i = 0; i < maskData.data.length; i++) {
+                const value = maskData.data[i] * 255;
+                // 異なる色でマスクを描画
+                const hue = (index * 137.5) % 360; // 黄金角で色を分散
+                const rgb = this.hslToRgb(hue / 360, 0.5, 0.5);
+                imageData.data[i * 4] = rgb[0];     // R
+                imageData.data[i * 4 + 1] = rgb[1]; // G
+                imageData.data[i * 4 + 2] = rgb[2]; // B
+                imageData.data[i * 4 + 3] = value;   // A
+            }
+
+            maskCtx.putImageData(imageData, 0, 0);
+
+            // マスクをメインキャンバスにスケーリングして描画
+            this.maskCtx.drawImage(maskCanvas, 0, 0, this.maskCanvas.width, this.maskCanvas.height);
+        });
+    }
+
+    hslToRgb(h, s, l) {
+        let r, g, b;
+        if (s === 0) {
+            r = g = b = l; // achromatic
+        } else {
+            const hue2rgb = (p, q, t) => {
+                if (t < 0) t += 1;
+                if (t > 1) t -= 1;
+                if (t < 1/6) return p + (q - p) * 6 * t;
+                if (t < 1/2) return q;
+                if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+                return p;
+            };
+            const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+            const p = 2 * l - q;
+            r = hue2rgb(p, q, h + 1/3);
+            g = hue2rgb(p, q, h);
+            b = hue2rgb(p, q, h - 1/3);
+        }
+        return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
     }
 
     clearMask() {
