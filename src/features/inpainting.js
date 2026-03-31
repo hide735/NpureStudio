@@ -9,25 +9,50 @@ export async function initInpainting(transformers) {
         const device = navigator.gpu ? 'webgpu' : 'cpu';
         console.log(`Using device: ${device}`);
 
-        const modelCandidates = [
+        const localModelCandidates = [
+            'models/Xenova/stable-diffusion-inpainting',
+            'models/Xenova/stable-diffusion-1.5-inpainting',
+            'models/Xenova/stable-diffusion-2-inpainting',
+            'models/Xenova/stable-diffusion-v1-5'
+        ];
+
+        const remoteModelCandidates = [
             'Xenova/stable-diffusion-inpainting',
             'Xenova/stable-diffusion-1.5-inpainting',
             'Xenova/stable-diffusion-2-inpainting',
-            'Xenova/stable-diffusion-v1-5' // 後段フォールバック
+            'Xenova/stable-diffusion-v1-5'
         ];
 
         let lastError = null;
-        for (const model of modelCandidates) {
+
+        const tryModel = async (model) => {
             try {
                 console.log(`Trying model: ${model}`);
                 inpainter = await transformers.pipeline('image-to-image', model, {
                     device: device
                 });
                 console.log(`Loaded inpainting model: ${model}`);
-                break;
+                return true;
             } catch (err) {
                 console.warn(`Failed to load model ${model}:`, err.message || err);
                 lastError = err;
+                return false;
+            }
+        };
+
+        // 1) ローカルモデルパスを優先
+        for (const model of localModelCandidates) {
+            if (await tryModel(model)) {
+                break;
+            }
+        }
+
+        // 2) リモートモデルを試す
+        if (!inpainter) {
+            for (const model of remoteModelCandidates) {
+                if (await tryModel(model)) {
+                    break;
+                }
             }
         }
 
