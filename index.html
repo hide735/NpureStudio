@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>NpureStudio - WebGPU Test</title>
+</head>
+<body>
+    <h1>NpureStudio WebGPU Check</h1>
+    <div id="status">Checking WebGPU support...</div>
+
+    <script>
+        async function checkWebGPU() {
+            const statusDiv = document.getElementById('status');
+            if (!navigator.gpu) {
+                statusDiv.innerHTML = "❌ WebGPU is NOT supported in this browser.";
+                statusDiv.style.color = "red";
+                return;
+            }
+
+            const adapter = await navigator.gpu.requestAdapter();
+            if (adapter) {
+                statusDiv.innerHTML = "✅ WebGPU is supported! Your iPhone NPU is ready.";
+                statusDiv.style.color = "green";
+                console.log("Adapter info:", adapter);
+            } else {
+                statusDiv.innerHTML = "❌ WebGPU supported, but no adapter found.";
+            }
+        }
+        checkWebGPU();
+    </script>
+</body>
+</html>
