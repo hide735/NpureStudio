@@ -1,1 +1,14 @@
 node_modules/
+pycache/
+*.pyc
+*.onnx
+*.pem
+*.key
+.env
+.env.local
+.DS_Store
+.idea/
+.vscode/
+.log
+**/__pycache__/
+.venv/

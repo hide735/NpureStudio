@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>NpureStudio ONNX Demo</title>
+  <style>body{font-family:system-ui, -apple-system, sans-serif;padding:12px} canvas{border:1px solid #ccc}</style>
+</head>
+<body>
+  <h2>ONNX Runtime Web — Inpaint model demo</h2>
+  <p>モデル: <code>tools/onnx_prototype/models/small_unet_embedded.onnx</code></p>
+  <button id="run">Run inference</button>
+    <div>
+      <label>画像をアップロード: <input id="imgfile" type="file" accept="image/*"></label>
+      <label style="margin-left:12px"><input id="useModel" type="checkbox" checked> モデルを使用</label>
+      <button id="run">Run inference</button>
+    </div>
+  <div>
+    <canvas id="out" width="128" height="128"></canvas>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="console.log('OpenCV loaded')"></script>
+  <script type="module">
+    import { loadModel, runInpaint } from './onnx_inpaint.js';
+
+    const btn = document.getElementById('run');
+    const canvas = document.getElementById('out');
+    const ctx = canvas.getContext('2d', {willReadFrequently: true});
+
+    let session = null;
+    async function ensureModel(){
+      if(!session){
+        // model path relative to the server root
+        session = await loadModel('/tools/onnx_prototype/models/small_unet_embedded.onnx');
+        console.log('model loaded', session);
+      }
+      return session;
+    }
+
+    function makeDummyInput(H=128,W=128){
+      // create simple gradient + alpha channel as 4th
+      const C=4; const data = new Float32Array(1*C*H*W);
+      for(let y=0;y<H;y++){
+        for(let x=0;x<W;x++){
+          const i = (y*W + x);
+          data[i] = x / (W-1);           // R channel placeholder
+          data[H*W + i] = y / (H-1);     // G channel placeholder
+          data[2*H*W + i] = 0.5;         // B channel constant
+          data[3*H*W + i] = (x>W/4 && x<3*W/4 && y>H/4 && y<3*H/4)?1.0:0.0; // mask-ish
+        }
+      }
+      return {data, dims:[1,4,H,W]};
+    }
+
+      // Convert uploaded image (Image element) to model input {data,dims}
+      function imageToInput(img, H=128, W=128){
+        const off = document.createElement('canvas');
+        off.width = W; off.height = H;
+        const octx = off.getContext('2d', {willReadFrequently: true});
+        // draw image with cover-fit
+        octx.drawImage(img, 0, 0, W, H);
+        const id = octx.getImageData(0,0,W,H).data;
+        const C = 4; const data = new Float32Array(1*C*H*W);
+        for(let y=0;y<H;y++){
+          for(let x=0;x<W;x++){
+            const p = (y*W + x)*4;
+            const r = id[p], g = id[p+1], b = id[p+2], a = id[p+3];
+            const idx = y*W + x;
+            // normalize to [-1,1]
+            data[idx] = (r/255)*2-1;
+            data[H*W + idx] = (g/255)*2-1;
+            data[2*H*W + idx] = (b/255)*2-1;
+            data[3*H*W + idx] = a>0?1.0:0.0;
+          }
+        }
+        return {data, dims:[1,4,H,W]};
+      }
+
+      let userInput = null;
+      const fileEl = document.getElementById('imgfile');
+      fileEl.addEventListener('change', (ev)=>{
+        const f = ev.target.files && ev.target.files[0];
+        if(!f) return;
+        const url = URL.createObjectURL(f);
+        const img = new Image();
+        img.onload = ()=>{
+          userInput = imageToInput(img,128,128);
+          // preview on canvas
+          const tmp = document.createElement('canvas'); tmp.width=128; tmp.height=128;
+          tmp.getContext('2d', {willReadFrequently: true}).drawImage(img,0,0,128,128);
+          ctx.clearRect(0,0,128,128);
+          ctx.drawImage(tmp,0,0);
+          URL.revokeObjectURL(url);
+        };
+        img.src = url;
+      });
+
+    btn.addEventListener('click', async ()=>{
+      btn.disabled = true;
+      btn.textContent = 'Running...';
+      try{
+        const useModel = document.getElementById('useModel').checked;
+        const sess = await ensureModel();
+        const input = userInput || makeDummyInput(128,128);
+        if(!useModel){
+          // bypass model: just display the input preview
+          const H=128,W=128; const img = ctx.createImageData(W,H);
+          const src = input.data;
+          for(let y=0;y<H;y++){
+            for(let x=0;x<W;x++){
+              const idx = y*W + x; const p = idx*4;
+              const r = src[idx]; const g = src[H*W + idx]; const b = src[2*H*W + idx];
+              // input is normalized to [-1,1]
+              img.data[p] = Math.round((r*0.5+0.5)*255);
+              img.data[p+1] = Math.round((g*0.5+0.5)*255);
+              img.data[p+2] = Math.round((b*0.5+0.5)*255);
+              img.data[p+3] = 255;
+            }
+          }
+          ctx.putImageData(img,0,0);
+          return;
+        }
+        // Build feeds explicitly using session's declared input name, fallback to 'input'
+        const inName = (sess.inputNames && sess.inputNames.length>0) ? sess.inputNames[0]
+                      : (Array.isArray(sess.inputMetadata) && sess.inputMetadata[0] && sess.inputMetadata[0].name) ? sess.inputMetadata[0].name
+                      : 'input';
+        console.log('Using input name for feed:', inName);
+        const feeds = {};
+        feeds[inName] = new ort.Tensor('float32', input.data, input.dims);
+        // Also include common fallback keys to improve compatibility
+        if(!feeds['input']) feeds['input'] = feeds[inName];
+        const result = await sess.run(feeds);
+        // get first output
+        const outName = (sess.outputNames && sess.outputNames.length>0) ? sess.outputNames[0] : Object.keys(result)[0];
+        const out = result[outName];
+        const outData = out.data || out.values || out;
+        // Debug: compute per-channel stats to diagnose color issues
+        (function computeStats(){
+          try{
+            const H=128, W=128, HW=H*W;
+            function stats(offset){
+              let min=Infinity,max=-Infinity,sum=0;
+              for(let i=0;i<HW;i++){ const v = outData[offset + i]; if(v<min)min=v; if(v>max)max=v; sum+=v; }
+              return {min,max,mean:sum/HW};
+            }
+            const s0 = stats(0), s1 = stats(HW), s2 = stats(2*HW);
+            console.log('Output channel stats:', {R:s0, G:s1, B:s2});
+          }catch(e){ console.warn('stats error', e); }
+        })();
+        const H=128, W=128; const img = ctx.createImageData(W,H);
+        for(let y=0;y<H;y++){
+          for(let x=0;x<W;x++){
+            const idx = y*W + x;
+            const r = outData[idx];
+            const g = outData[H*W + idx];
+            const b = outData[2*H*W + idx];
+            const p = idx*4;
+            img.data[p] = Math.max(0,Math.min(255,Math.round((r*0.5+0.5)*255)));
+            img.data[p+1] = Math.max(0,Math.min(255,Math.round((g*0.5+0.5)*255)));
+            img.data[p+2] = Math.max(0,Math.min(255,Math.round((b*0.5+0.5)*255)));
+            img.data[p+3] = 255;
+          }
+        }
+        ctx.putImageData(img,0,0);
+      }catch(e){
+        console.error(e);
+        alert('Error: '+e.message);
+      }finally{
+        btn.disabled = false;
+        btn.textContent = 'Run inference';
+      }
+    });
+
+    // OpenCV inpaint demo: mask center square and apply Telea
+    const ocvBtn = document.createElement('button');
+    ocvBtn.textContent = 'Run OpenCV Telea inpaint (center)';
+    ocvBtn.disabled = true;
+    document.body.appendChild(ocvBtn);
+
+    // Enable ocvBtn when OpenCV runtime is ready
+    function enableOcvWhenReady(){
+      if(typeof cv !== 'undefined'){
+        if(typeof cv.onRuntimeInitialized === 'function'){
+          cv.onRuntimeInitialized = () => { ocvBtn.disabled = false; console.log('cv ready'); };
+        } else {
+          // already initialized
+          ocvBtn.disabled = false;
+          console.log('cv already initialized');
+        }
+        return true;
+      }
+      return false;
+    }
+
+    if(!enableOcvWhenReady()){
+      const t = setInterval(()=>{ if(enableOcvWhenReady()){ clearInterval(t); } }, 200);
+    }
+
+    ocvBtn.addEventListener('click', ()=>{
+      try{
+        console.log('ocv click start');
+        if(typeof cv === 'undefined'){
+          alert('OpenCV not loaded yet');
+          return;
+        }
+        const W=128, H=128;
+        console.log('about to getImageData');
+        const srcImg = ctx.getImageData(0,0,W,H);
+        console.log('got imageData', srcImg && srcImg.data && srcImg.data.length);
+        console.log('about to matFromImageData');
+        const src = cv.matFromImageData(srcImg);
+        console.log('matFromImageData OK', src && src.rows && src.cols);
+        console.log('about to create mask');
+        const mask = cv.Mat.zeros(H, W, cv.CV_8UC1);
+        console.log('mask created', mask.rows, mask.cols, mask.type());
+        // central square mask
+        const sx = Math.floor(W*0.25), sy = Math.floor(H*0.25);
+        const ex = Math.floor(W*0.75), ey = Math.floor(H*0.75);
+        for(let y=sy;y<ey;y++){
+          for(let x=sx;x<ex;x++){
+            // write in try to catch possible ucharPtr errors
+            try{ mask.ucharPtr(y,x)[0] = 255; } catch(me){ console.error('mask write error at',x,y,me); throw me; }
+          }
+        }
+        console.log('about to inpaint');
+        // Check availability of inpaint
+        if (typeof cv.inpaint !== 'function') {
+          console.error('cv.inpaint is not available in this OpenCV.js build. Build info:',
+            typeof cv.getBuildInformation === 'function' ? cv.getBuildInformation().slice(0,1000) : 'no build info');
+          src.delete(); mask.delete();
+          alert('OpenCV.js build does not include inpaint(). Use a build with photo module, or run server-side inpainting. See console for build info.');
+          return;
+        }
+        // cv.inpaint expects 1- or 3-channel 8-bit image. Convert RGBA->RGB before inpainting.
+        const srcRGB = new cv.Mat();
+        try{
+          cv.cvtColor(src, srcRGB, cv.COLOR_RGBA2RGB);
+        }catch(err){
+          console.warn('cvtColor RGBA->RGB failed, trying RGBA->BGR', err);
+          cv.cvtColor(src, srcRGB, cv.COLOR_RGBA2BGR);
+        }
+        const dst = new cv.Mat();
+        cv.inpaint(srcRGB, mask, dst, 3, cv.INPAINT_TELEA);
+        console.log('inpaint OK', dst && dst.rows && dst.cols);
+        // show dst (3-channel) onto canvas
+        const outCanvas = document.createElement('canvas'); outCanvas.width=W; outCanvas.height=H;
+        cv.imshow(outCanvas, dst);
+        console.log('imshow OK');
+        // draw result to main canvas
+        ctx.clearRect(0,0,W,H);
+        ctx.drawImage(outCanvas,0,0);
+        // cleanup
+        src.delete(); mask.delete(); srcRGB.delete(); dst.delete();
+      }catch(e){
+        console.error('OpenCV handler exception:', e, e && e.stack);
+        alert('OpenCV error: '+(e && (e.message || e.toString()) || 'unknown'));
+      }
+    });
+  </script>
+</body>
+</html>
