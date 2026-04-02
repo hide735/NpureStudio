@@ -45,3 +45,33 @@
 
 - [概要設計.md](../docs/概要設計.md)
 - [詳細設計.md](../docs/詳細設計.md)
+
+## 最近の変更と運用メモ
+
+- `src/demo_onnx.html` の ONNX デモを一時的に無効化しました。
+   - 理由: リポジトリ内の ONNX モデルが外部データ形式で欠けており、ブラウザでの読み込み時に protobuf 解析エラーが発生しました。
+   - 必要であれば `tools/onnx_prototype/export_onnx.py` でモデルを再生成し、`tools/onnx_prototype/embed_external_data.py` で *_embedded.onnx を作成してください。
+
+- `src/features/inpainting.js` を Stable Diffusion 直接実行から切り替え、
+   Qwen2-VL 系モデルによる「解析 → 矩形座標抽出」フローに置き換えました。
+   - 解析モデルは `transformers.pipeline('image-to-text', ...)` を想定しています。
+   - 抽出した矩形に対しては WebGPU の利用を試み、未対応や失敗時は軽量な Canvas ダウンサンプリング／アップサンプリングで補正します。
+   - 戻り値は `HTMLCanvasElement` になっており、既存の `src/app.js` の呼び出し箇所と互換性があります。
+
+### 今後の推奨作業
+
+- すぐに開発を進める場合は ONNX デモを無視して `src` 側の機能（Qwen2-VL フロー、UI）を優先してください。
+- ONNX デモを復旧する場合の手順（簡潔）:
+   1. Python 仮想環境を作成して依存をインストール (`tools/onnx_prototype/requirements.txt`)。
+   2. `python tools/onnx_prototype/export_onnx.py --output tools/onnx_prototype/models/small_unet.onnx`
+   3. `python tools/onnx_prototype/embed_external_data.py tools/onnx_prototype/models/small_unet.onnx` を実行し、`small_unet_embedded.onnx` を生成。
+   4. `src/demo_onnx.html` を元に戻してデモを有効化。
+
+### ローカル確認コマンド
+
+開発サーバ起動（静的ファイルを提供）:
+```powershell
+npx http-server . -p 8080
+```
+
+問題がなければブラウザで `http://localhost:8080/src/` を開き、NpureStudio UI を操作してください。

@@ -7,36 +7,14 @@
   <style>body{font-family:system-ui, -apple-system, sans-serif;padding:12px} canvas{border:1px solid #ccc}</style>
 </head>
 <body>
-  <h2>ONNX Runtime Web — Inpaint model demo</h2>
-  <p>モデル: <code>tools/onnx_prototype/models/small_unet_embedded.onnx</code></p>
-  <button id="run">Run inference</button>
-    <div>
-      <label>画像をアップロード: <input id="imgfile" type="file" accept="image/*"></label>
-      <label style="margin-left:12px"><input id="useModel" type="checkbox" checked> モデルを使用</label>
-      <button id="run">Run inference</button>
-    </div>
+  <h2>ONNX Runtime Web — Inpaint model demo (DISABLED)</h2>
+  <p style="color:#900">このデモは現在無効化されています。ONNXモデルの外部データが欠けているため、混乱を避けるため表示を停止しています。</p>
+  <p>場所: <code>tools/onnx_prototype/</code></p>
+  <p>必要な場合は <code>tools/onnx_prototype/export_onnx.py</code> でモデルを再生成してください。</p>
+
   <div>
-    <canvas id="out" width="128" height="128"></canvas>
+    <button disabled>Run inference (disabled)</button>
   </div>
-
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
-  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="console.log('OpenCV loaded')"></script>
-  <script type="module">
-    import { loadModel, runInpaint } from './onnx_inpaint.js';
-
-    const btn = document.getElementById('run');
-    const canvas = document.getElementById('out');
-    const ctx = canvas.getContext('2d', {willReadFrequently: true});
-
-    let session = null;
-    async function ensureModel(){
-      if(!session){
-        // model path relative to the server root
-        session = await loadModel('/tools/onnx_prototype/models/small_unet_embedded.onnx');
-        console.log('model loaded', session);
-      }
-      return session;
-    }
 
     function makeDummyInput(H=128,W=128){
       // create simple gradient + alpha channel as 4th
