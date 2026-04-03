@@ -3,176 +3,196 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Model Loader Debug — NpureStudio</title>
+  <title>Advanced Model Loader Debug — NpureStudio</title>
   <style>
-    body { font-family: system-ui, -apple-system, Arial, sans-serif; padding: 20px; }
-    label { display: block; margin: 8px 0; }
-    input, select, button { margin-right: 8px; }
-    #log { width: 100%; height: 320px; background: #111; color: #eee; padding: 12px; overflow:auto; white-space:pre-wrap; }
-    .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    body { font-family: system-ui, -apple-system, Arial, sans-serif; padding: 20px; line-height: 1.5; }
+    label { display: block; margin: 8px 0; font-weight: bold; }
+    input, select, button { margin: 4px 8px 4px 0; padding: 8px; }
+    #log { width: 100%; height: 400px; background: #111; color: #00ff00; padding: 12px; overflow:auto; white-space:pre-wrap; font-family: monospace; font-size: 13px; border-radius: 4px; }
+    .controls { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin-bottom: 20px; border: 1px solid #ccc; padding: 15px; border-radius: 8px; }
+    .status-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; background: #eee; margin-left: 10px; }
+    h2 { border-bottom: 2px solid #333; padding-bottom: 5px; }
   </style>
 </head>
 <body>
-  <h1>Model Loader Debug</h1>
-  <p>このページはブラウザから Hugging Face Hub 上のモデルを直接ロードし、CORS / 認可エラーやロード結果を確認するためのデバッグ用です。</p>
+  <h1>NpureStudio: Advanced Debugger</h1>
+  <p>Task 03 (画像認識) の完了確認および Task 04 (SAM) の先行実装テスト用です。</p>
 
   <div class="controls">
-    <label>Quick Select: 
+    <div>
+      <label>Quick Select:</label>
       <select id="modelSelect">
-        <option value="">-- 選択してください --</option>
-        <option value="Xenova/blip-image-captioning-base">BLIP (Xenova版・安定)</option>
-        <option value="onnx-community/Salesforce_blip-image-captioning-base">BLIP (onnx-community版)</option>
-        <option value="Xenova/vit-gpt2-image-captioning">vit-gpt2 (成功実績あり)</option>
-        <option value="Nagafi/moondream2-q4-onnx">Moondream2 (ONNX版)</option>
-        <option value="Xenova/laion-vit-gpt2-canary">laion-vit-gpt2</option>
+        <option value="">-- モデルを選択 --</option>
+        <option value="Xenova/vit-gpt2-image-captioning">vit-gpt2 (成功済み)</option>
+<!--        <option value="Xenova/blip-image-captioning-base">BLIP (Xenova版)</option> -->
+        <option value="Xenova/slimsam-77-uniform">SAM (Standard版)(成功済み)</option>
+<!--        <option value="Xenova/slid-vit-base-patch16">SAM (Xenova版)</option> -->
       </select>
-    </label>
-    <label>Pipeline: 
+    </div>
+
+    <div>
+      <label>Model ID:</label>
+      <input id="modelId" style="min-width:350px" value="Xenova/vit-gpt2-image-captioning" />
+    </div>
+
+    <div>
+      <label>Device:</label>
+      <select id="deviceSelect">
+        <option value="webgpu">WebGPU</option>
+        <option value="wasm">WASM (CPU)</option>
+      </select>
+    </div>
+
+    <div>
+      <label>Task Type:</label>
       <select id="pipelineType">
-        <option>image-to-text</option>
-        <option>image-segmentation</option>
-        <option>image-classification</option>
+        <option value="image-to-text">image-to-text</option>
+        <option value="mask-generation">mask-generation (SAM)</option>
       </select>
-    </label>
-    <label>Device: <select id="deviceSelect"><option>webgpu</option><option>cpu</option></select></label>
-    <button id="loadBtn">Load Pipeline</button>
-    <button id="fetchTestBtn">Fetch test (config/tokenizer)</button>
-    <button id="clearLogsBtn">Clear logs</button>
+    </div>
   </div>
 
-  <div style="margin-top:12px">
-    <label>Test image (optional): <input id="imageInput" type="file" accept="image/*" /></label>
-    <button id="runInferBtn">Run Inference (use selected image)</button>
+  <div class="controls">
+    <button id="fetchTestBtn" style="background:#e1f5fe">1. Fetch Test</button>
+    <button id="loadBtn" style="background:#fff9c4">2. Load Model & Processor</button>
+    <button id="runInferBtn" style="background:#c8e6c9">3. Run Inference</button>
   </div>
 
-  <hr />
+  <div style="margin-bottom: 20px;">
+    <label>Test Image: <input type="file" id="imageInput" accept="image/*" /></label>
+  </div>
+
+  <h2>Debug Console</h2>
   <div id="log"></div>
 
   <script type="module">
-    import * as TransformersModule from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3';
-
-    // 内部の env や pipeline を直接取り出す
-    const { pipeline, env, RawImage, VERSION } = TransformersModule;
-    var modelId = '';
-
-    // windowにセット（デバッグ用）
-    window.transformers = TransformersModule;
-
-    // ログ出力 (v3では大文字の VERSION の場合があります)
-    console.log('Transformers version:', VERSION || TransformersModule.version);
+    import * as transformers from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3';
 
     const $ = (id) => document.getElementById(id);
-    const logEl = $('log');
-    function log(...args) {
-      const line = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a, null, 2))).join(' ');
-      logEl.textContent += '\n' + new Date().toLocaleTimeString() + ' - ' + line;
-      logEl.scrollTop = logEl.scrollHeight;
-      console.log(...args);
-    }
+    const log = (...args) => {
+      const msg = args.map(a => (typeof a === 'object' ? JSON.stringify(a, null, 2) : a)).join(' ');
+      const time = new Date().toLocaleTimeString();
+      $('log').textContent += `[${time}] ${msg}\n`;
+      $('log').scrollTop = $('log').scrollHeight;
+    };
 
-    let pipelineFn = null;
+    // グローバルインスタンス保持
+    let currentModel = null;
+    let currentProcessor = null;
+    let currentPipeline = null;
 
-    $('clearLogsBtn').addEventListener('click', () => { logEl.textContent = ''; });
+    // 要素の取得
+    const modelInput = $('modelId');
+    const modelSelect = $('modelSelect');
+    const pipelineType = $('pipelineType');
+    const deviceSelect = $('deviceSelect');
 
-    $('fetchTestBtn').addEventListener('click', async () => {
-      const model = modelId.trim();
-      if (!model) return log('Model ID を入力してください');
-      const files = ['config.json','tokenizer.json','preprocessor_config.json'];
-      for (const f of files) {
-        const url = `https://huggingface.co/${model}/resolve/main/${f}`;
-        //const url = `https://huggingface.co/${model}/raw/main/${f}`;
-        // const url = `https://huggingface.co/${model}/resolve/main/${f}?not-cached=${Date.now()}`;
-        log('fetch', url);
-        try {
-          const res = await fetch(url, {
-              method: 'GET',
-              mode: 'cors',
-              credentials: 'omit',
-              cache: 'no-cache',
-              headers: {
-                  'Accept': 'application/json' // 明示的に「データが欲しい」とだけ伝える
-              }
-          });
-          log(`${f} -> status=${res.status} ok=${res.ok}`);
-          try { log('  content-type:', res.headers.get('content-type')); } catch(e){}
-        } catch (err) {
-          log(`fetch error for ${f}:`, err && err.message ? err.message : String(err));
+    // 1. セレクトボックス連動
+    modelSelect.addEventListener('change', (e) => {
+      if (e.target.value) {
+        modelInput.value = e.target.value;
+        log('Model changed to:', e.target.value);
+        // SAM系ならTask Typeを自動変更
+        if (e.target.value.includes('sam') || e.target.value.includes('slid')) {
+          pipelineType.value = 'mask-generation';
+        } else {
+          pipelineType.value = 'image-to-text';
         }
       }
     });
 
+    // 2. Fetch Test (401回避策付き)
+    $('fetchTestBtn').addEventListener('click', async () => {
+      const model = modelInput.value.trim();
+      const files = ['config.json', 'tokenizer.json', 'preprocessor_config.json'];
+      log(`Starting fetch test for: ${model}...`);
+
+      for (const f of files) {
+        // キャッシュ・認証情報の残骸を回避するためにタイムスタンプを付与
+        const url = `https://huggingface.co/${model}/resolve/main/${f}?nc=${Date.now()}`;
+        try {
+          const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
+          log(`${f} -> status=${res.status} ok=${res.ok}`);
+        } catch (err) {
+          log(`${f} -> Fetch Error:`, err.message);
+        }
+      }
+    });
+
+    // 3. Load Model (分割ロード & SAM対応)
     $('loadBtn').addEventListener('click', async () => {
-      const model = modelId.trim();
-      const ptype = $('pipelineType').value;
-      const device = $('deviceSelect').value;
-      if (!model) return log('Model ID を入力してください');
+      const modelId = modelInput.value.trim();
+      const device = deviceSelect.value;
+      const type = pipelineType.value;
+
+      log(`Preparing env for ${device}...`);
+      transformers.env.allowLocalModels = false;
+      transformers.env.allowRemoteModels = true;
+      // 内部フェッチのオプションを強化
+      transformers.env.fetch_options = {
+        credentials: 'omit',
+        mode: 'cors'
+      };
 
       try {
-        log('Preparing transformers env: allowRemoteModels=true, allowLocalModels=false');
+        // 解放処理
+        currentModel = null;
+        currentProcessor = null;
+        currentPipeline = null;
 
-        transformers.env.remoteHeaders = {};
-        // 【重要】ライブラリの内部通信でも認証情報（トークン）を一切送らないように設定
-        transformers.env.fetch_options = {
-            credentials: 'omit',
-            mode: 'cors',
-            cache: 'no-cache',
-        };
-        // transformers.env.allowLocalModels = false;
-        transformers.env.allowRemoteModels = true;
-
-        log(`Loading pipeline '${ptype}' @ ${model} (device=${device}) ...`);
-        pipelineFn = await transformers.pipeline(ptype, model, {
-           device,
-           // 通信エラーを避けるためのオプション（ただし transformers のバージョンによっては未対応の可能性があります）
-           download_error_callback: (err) => log('Download progress error:', err)
-        });
-        log('Pipeline loaded — ready.');
+        if (type === 'mask-generation' || modelId.includes('sam')) {
+          log('--- SAM Segmentaion Mode (Manual Load) ---');
+          log('Loading SamModel...');
+          currentModel = await transformers.SamModel.from_pretrained(modelId, {
+             device
+          });
+          log('Loading SamProcessor...');
+          currentProcessor = await transformers.AutoProcessor.from_pretrained(modelId);
+          log('SAM Components loaded successfully.');
+        } else {
+          log('--- Standard Pipeline Mode ---');
+          currentPipeline = await transformers.pipeline(type, modelId, { device });
+          log('Pipeline ready.');
+        }
       } catch (err) {
-        log('Pipeline load failed:', err && err.message ? err.message : String(err));
+        log('Load Failed:', err.message);
         console.error(err);
       }
     });
 
+    // 4. Run Inference
     $('runInferBtn').addEventListener('click', async () => {
-      if (!pipelineFn) return log('先に Pipeline をロードしてください');
       const file = $('imageInput').files[0];
-      if (!file) return log('画像ファイルを選択してください');
+      if (!file) return log('画像を選択してください');
+      if (!currentPipeline && !currentModel) return log('モデルをロードしてください');
 
       try {
-        const img = await new Promise((resolve, reject) => {
-          const i = new Image();
-          i.onload = () => resolve(i);
-          i.onerror = reject;
-          i.src = URL.createObjectURL(file);
-        });
+        const url = URL.createObjectURL(file);
+        const rawImage = await transformers.RawImage.fromURL(url);
+        log(`Image loaded: ${rawImage.width}x${rawImage.height}`);
 
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0);
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const raw = new transformers.RawImage(imageData.data, imageData.width, imageData.height, 4);
-
-        log('Running inference (this may take time)...');
-        const out = await pipelineFn(raw);
-        log('Inference result:', out);
+        if (currentModel && currentProcessor) {
+          log('Running SAM Inference (High-level)...');
+          // 低レイヤーロード後の推論テスト
+          const inputs = await currentProcessor(rawImage);
+          const outputs = await currentModel(inputs);
+          
+          log('SAM inference done.');
+          if (outputs.pred_masks) {
+              log('Masks shape:', outputs.pred_masks.dims);
+              log('Success: Task 04 Data Pipeline established.');
+          }
+        } else if (currentPipeline) {
+          log('Running Pipeline Inference...');
+          const result = await currentPipeline(rawImage);
+          log('Result:', result);
+        }
       } catch (err) {
-        log('Inference failed:', err && err.message ? err.message : String(err));
-        console.error(err);
+        log('Inference Error:', err.message);
       }
     });
 
-    // セレクトボックスの連動処理
-    $('modelSelect').addEventListener('change', (e) => {
-      if (e.target.value) {
-        modelId = e.target.value;
-        log('Selected model:', e.target.value);
-      }
-    });
-
-    // Quick status
-    log('Debug page ready. transformers version:', TransformersModule.env.version);
+    log('Advanced Debug page ready. version:', transformers.version);
   </script>
 </body>
 </html>
