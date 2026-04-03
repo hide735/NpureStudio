@@ -40,8 +40,16 @@
   <div id="log"></div>
 
   <script type="module">
-    import * as transformers from '../assets/transformers.min.js';
-    window.transformers = transformers;
+import * as TransformersModule from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3';
+
+// 内部の env や pipeline を直接取り出す
+const { pipeline, env, RawImage, VERSION } = TransformersModule;
+
+// windowにセット（デバッグ用）
+window.transformers = TransformersModule;
+
+// ログ出力 (v3では大文字の VERSION の場合があります)
+console.log('Transformers version:', VERSION || TransformersModule.version);
 
     const $ = (id) => document.getElementById(id);
     const logEl = $('log');
