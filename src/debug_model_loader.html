@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Model Loader Debug — NpureStudio</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Arial, sans-serif; padding: 20px; }
+    label { display: block; margin: 8px 0; }
+    input, select, button { margin-right: 8px; }
+    #log { width: 100%; height: 320px; background: #111; color: #eee; padding: 12px; overflow:auto; white-space:pre-wrap; }
+    .controls { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  </style>
+</head>
+<body>
+  <h1>Model Loader Debug</h1>
+  <p>このページはブラウザから Hugging Face Hub 上のモデルを直接ロードし、CORS / 認可エラーやロード結果を確認するためのデバッグ用です。</p>
+
+  <div class="controls">
+    <label>Model ID: <input id="modelId" style="min-width:420px" value="onnx-community/Qwen2-VL-2B-Instruct" /></label>
+    <label>Pipeline: 
+      <select id="pipelineType">
+        <option>image-to-text</option>
+        <option>image-segmentation</option>
+        <option>image-classification</option>
+      </select>
+    </label>
+    <label>Device: <select id="deviceSelect"><option>webgpu</option><option>cpu</option></select></label>
+    <button id="loadBtn">Load Pipeline</button>
+    <button id="fetchTestBtn">Fetch test (config/tokenizer)</button>
+    <button id="clearLogsBtn">Clear logs</button>
+  </div>
+
+  <div style="margin-top:12px">
+    <label>Test image (optional): <input id="imageInput" type="file" accept="image/*" /></label>
+    <button id="runInferBtn">Run Inference (use selected image)</button>
+  </div>
+
+  <hr />
+  <div id="log"></div>
+
+  <script type="module">
+    import * as transformers from '../assets/transformers.min.js';
+    window.transformers = transformers;
+
+    const $ = (id) => document.getElementById(id);
+    const logEl = $('log');
+    function log(...args) {
+      const line = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a, null, 2))).join(' ');
+      logEl.textContent += '\n' + new Date().toLocaleTimeString() + ' - ' + line;
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(...args);
+    }
+
+    let pipelineFn = null;
+
+    $('clearLogsBtn').addEventListener('click', () => { logEl.textContent = ''; });
+
+    $('fetchTestBtn').addEventListener('click', async () => {
+      const model = $('modelId').value.trim();
+      if (!model) return log('Model ID を入力してください');
+      const files = ['config.json','tokenizer.json','preprocessor_config.json'];
+      for (const f of files) {
+        const url = `https://huggingface.co/${model}/resolve/main/${f}`;
+        log('fetch', url);
+        try {
+          const res = await fetch(url, { method: 'GET', mode: 'cors' });
+          log(`${f} -> status=${res.status} ok=${res.ok}`);
+          try { log('  content-type:', res.headers.get('content-type')); } catch(e){}
+        } catch (err) {
+          log(`fetch error for ${f}:`, err && err.message ? err.message : String(err));
+        }
+      }
+    });
+
+    $('loadBtn').addEventListener('click', async () => {
+      const model = $('modelId').value.trim();
+      const ptype = $('pipelineType').value;
+      const device = $('deviceSelect').value;
+      if (!model) return log('Model ID を入力してください');
+
+      try {
+        log('Preparing transformers env: allowRemoteModels=true, allowLocalModels=false');
+        transformers.env.allowLocalModels = false;
+        transformers.env.allowRemoteModels = true;
+
+        log(`Loading pipeline '${ptype}' @ ${model} (device=${device}) ...`);
+        pipelineFn = await transformers.pipeline(ptype, model, { device });
+        log('Pipeline loaded — ready.');
+      } catch (err) {
+        log('Pipeline load failed:', err && err.message ? err.message : String(err));
+        console.error(err);
+      }
+    });
+
+    $('runInferBtn').addEventListener('click', async () => {
+      if (!pipelineFn) return log('先に Pipeline をロードしてください');
+      const file = $('imageInput').files[0];
+      if (!file) return log('画像ファイルを選択してください');
+
+      try {
+        const img = await new Promise((resolve, reject) => {
+          const i = new Image();
+          i.onload = () => resolve(i);
+          i.onerror = reject;
+          i.src = URL.createObjectURL(file);
+        });
+
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const raw = new transformers.RawImage(imageData.data, imageData.width, imageData.height, 4);
+
+        log('Running inference (this may take time)...');
+        const out = await pipelineFn(raw);
+        log('Inference result:', out);
+      } catch (err) {
+        log('Inference failed:', err && err.message ? err.message : String(err));
+        console.error(err);
+      }
+    });
+
+    // Quick status
+    log('Debug page ready. transformers version:', transformers?.version || '(unknown)');
+  </script>
+</body>
+</html>
