@@ -17,7 +17,16 @@
   <p>このページはブラウザから Hugging Face Hub 上のモデルを直接ロードし、CORS / 認可エラーやロード結果を確認するためのデバッグ用です。</p>
 
   <div class="controls">
-    <label>Model ID: <input id="modelId" style="min-width:420px" value="onnx-community/Qwen2-VL-2B-Instruct" /></label>
+    <label>Quick Select: 
+      <select id="modelSelect">
+        <option value="">-- 選択してください --</option>
+        <option value="Xenova/blip-image-captioning-base">BLIP (Xenova版・安定)</option>
+        <option value="onnx-community/Salesforce_blip-image-captioning-base">BLIP (onnx-community版)</option>
+        <option value="Xenova/vit-gpt2-image-captioning">vit-gpt2 (成功実績あり)</option>
+        <option value="Nagafi/moondream2-q4-onnx">Moondream2 (ONNX版)</option>
+        <option value="Xenova/laion-vit-gpt2-canary">laion-vit-gpt2</option>
+      </select>
+    </label>
     <label>Pipeline: 
       <select id="pipelineType">
         <option>image-to-text</option>
@@ -40,16 +49,17 @@
   <div id="log"></div>
 
   <script type="module">
-import * as TransformersModule from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3';
+    import * as TransformersModule from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3';
 
-// 内部の env や pipeline を直接取り出す
-const { pipeline, env, RawImage, VERSION } = TransformersModule;
+    // 内部の env や pipeline を直接取り出す
+    const { pipeline, env, RawImage, VERSION } = TransformersModule;
+    var modelId = '';
 
-// windowにセット（デバッグ用）
-window.transformers = TransformersModule;
+    // windowにセット（デバッグ用）
+    window.transformers = TransformersModule;
 
-// ログ出力 (v3では大文字の VERSION の場合があります)
-console.log('Transformers version:', VERSION || TransformersModule.version);
+    // ログ出力 (v3では大文字の VERSION の場合があります)
+    console.log('Transformers version:', VERSION || TransformersModule.version);
 
     const $ = (id) => document.getElementById(id);
     const logEl = $('log');
@@ -65,14 +75,24 @@ console.log('Transformers version:', VERSION || TransformersModule.version);
     $('clearLogsBtn').addEventListener('click', () => { logEl.textContent = ''; });
 
     $('fetchTestBtn').addEventListener('click', async () => {
-      const model = $('modelId').value.trim();
+      const model = modelId.trim();
       if (!model) return log('Model ID を入力してください');
       const files = ['config.json','tokenizer.json','preprocessor_config.json'];
       for (const f of files) {
         const url = `https://huggingface.co/${model}/resolve/main/${f}`;
+        //const url = `https://huggingface.co/${model}/raw/main/${f}`;
+        // const url = `https://huggingface.co/${model}/resolve/main/${f}?not-cached=${Date.now()}`;
         log('fetch', url);
         try {
-          const res = await fetch(url, { method: 'GET', mode: 'cors' });
+          const res = await fetch(url, {
+              method: 'GET',
+              mode: 'cors',
+              credentials: 'omit',
+              cache: 'no-cache',
+              headers: {
+                  'Accept': 'application/json' // 明示的に「データが欲しい」とだけ伝える
+              }
+          });
           log(`${f} -> status=${res.status} ok=${res.ok}`);
           try { log('  content-type:', res.headers.get('content-type')); } catch(e){}
         } catch (err) {
@@ -82,18 +102,30 @@ console.log('Transformers version:', VERSION || TransformersModule.version);
     });
 
     $('loadBtn').addEventListener('click', async () => {
-      const model = $('modelId').value.trim();
+      const model = modelId.trim();
       const ptype = $('pipelineType').value;
       const device = $('deviceSelect').value;
       if (!model) return log('Model ID を入力してください');
 
       try {
         log('Preparing transformers env: allowRemoteModels=true, allowLocalModels=false');
-        transformers.env.allowLocalModels = false;
+
+        transformers.env.remoteHeaders = {};
+        // 【重要】ライブラリの内部通信でも認証情報（トークン）を一切送らないように設定
+        transformers.env.fetch_options = {
+            credentials: 'omit',
+            mode: 'cors',
+            cache: 'no-cache',
+        };
+        // transformers.env.allowLocalModels = false;
         transformers.env.allowRemoteModels = true;
 
         log(`Loading pipeline '${ptype}' @ ${model} (device=${device}) ...`);
-        pipelineFn = await transformers.pipeline(ptype, model, { device });
+        pipelineFn = await transformers.pipeline(ptype, model, {
+           device,
+           // 通信エラーを避けるためのオプション（ただし transformers のバージョンによっては未対応の可能性があります）
+           download_error_callback: (err) => log('Download progress error:', err)
+        });
         log('Pipeline loaded — ready.');
       } catch (err) {
         log('Pipeline load failed:', err && err.message ? err.message : String(err));
@@ -131,8 +163,16 @@ console.log('Transformers version:', VERSION || TransformersModule.version);
       }
     });
 
+    // セレクトボックスの連動処理
+    $('modelSelect').addEventListener('change', (e) => {
+      if (e.target.value) {
+        modelId = e.target.value;
+        log('Selected model:', e.target.value);
+      }
+    });
+
     // Quick status
-    log('Debug page ready. transformers version:', transformers?.version || '(unknown)');
+    log('Debug page ready. transformers version:', TransformersModule.env.version);
   </script>
 </body>
 </html>
