@@ -22,6 +22,10 @@
 npm install
 npx http-server . -p 8080
 ```
+```
+別コンソールで
+npx local-ssl-proxy --source 9000 --target 8080
+```
 
 2. ブラウザでアプリを開き、DevTools のコンソールを確認します。期待ログ例:
 
@@ -65,7 +69,7 @@ $env:HUGGINGFACE_HUB_TOKEN = "hf_xxx"
 .\tools\download_hf_model.ps1 -Model "onnx-community/Qwen2-VL-2B-Instruct" -OutDir "models/onnx-community/Qwen2-VL-2B-Instruct"
 ```
 
-4. ダウンロードが完了したら、ブラウザで `http://localhost:8080` を開き挙動を確認してください。
+4. ダウンロードが完了したら、ブラウザで `https://localhost:9000` を開き挙動を確認してください。
 
 備考: トークンを直接ブラウザへ渡すのは危険です。可能ならサーバ側でダウンロードして配布する運用を採用してください。
 

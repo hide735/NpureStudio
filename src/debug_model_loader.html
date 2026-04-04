@@ -87,6 +87,25 @@
     const pipelineType = $('pipelineType');
     const deviceSelect = $('deviceSelect');
 
+    // デバイス判定のロジックを強化
+    const getDevice = async () => {
+      if (navigator.gpu) {
+        log('Gpu found. Checking WebGPU availability...');
+        try {
+          // 実際にアダプターが取得できるかチェック
+          const adapter = await navigator.gpu.requestAdapter();
+          log('WebGPU adapter:', adapter);
+          if (adapter) return 'webgpu';
+        } catch (e) {
+          console.warn("WebGPU found but failed to initialize:", e);
+        }
+      }
+      else {
+        log('WebGPU not supported in this browser.');
+      }
+      return 'wasm'; // WebGPUがダメならWASM（CPU）にフォールバック
+    };    
+
     // 1. セレクトボックス連動
     modelSelect.addEventListener('change', (e) => {
       if (e.target.value) {
@@ -122,7 +141,11 @@
     // 3. Load Model (分割ロード & SAM対応)
     $('loadBtn').addEventListener('click', async () => {
       const modelId = modelInput.value.trim();
-      const device = deviceSelect.value;
+      // const device = deviceSelect.value;
+
+      const device = await getDevice();
+      log(`Using device: ${device}`);
+
       const type = pipelineType.value;
 
       log(`Preparing env for ${device}...`);
@@ -142,9 +165,12 @@
 
         if (type === 'mask-generation' || modelId.includes('sam')) {
           log('--- SAM Segmentaion Mode (Manual Load) ---');
-          log('Loading SamModel...');
+          const dtype = device === 'webgpu' ? 'q8' : 'fp32';
+          log(`Loading SamModel... ${device} : ${dtype}`);
           currentModel = await transformers.SamModel.from_pretrained(modelId, {
-             device
+             device: device,
+            // WASMの場合は fp16 が使えないため、dtypeも調整が必要
+            dtype: dtype
           });
           log('Loading SamProcessor...');
           currentProcessor = await transformers.AutoProcessor.from_pretrained(modelId);
@@ -175,12 +201,25 @@
           log('Running SAM Inference (High-level)...');
           // 低レイヤーロード後の推論テスト
           const inputs = await currentProcessor(rawImage);
-          const outputs = await currentModel(inputs);
-          
-          log('SAM inference done.');
-          if (outputs.pred_masks) {
-              log('Masks shape:', outputs.pred_masks.dims);
-              log('Success: Task 04 Data Pipeline established.');
+          log('Inputs generated. Keys: ' + Object.keys(inputs));
+          // 2. テンソルの形状を確認（異常に大きくないか）
+          if (inputs.pixel_values) {
+            log('Pixel values shape: ' + inputs.pixel_values.dims);
+          }
+
+          log('Calling Model (Main Bottleneck)...');
+          try {
+            const outputs = await currentModel(inputs);
+            
+            log('Model finished successfully!');
+            log('SAM inference done.');
+            if (outputs.pred_masks) {
+                log('Masks shape:', outputs.pred_masks.dims);
+                log('Success: Task 04 Data Pipeline established.');
+            }
+          } catch (e) {
+            log('Model call failed:', e.message);
+            return;
           }
         } else if (currentPipeline) {
           log('Running Pipeline Inference...');
@@ -192,7 +231,7 @@
       }
     });
 
-    log('Advanced Debug page ready. version:', transformers.version);
+    log('Advanced Debug page ready. version:', transformers.env.version);
   </script>
 </body>
 </html>
