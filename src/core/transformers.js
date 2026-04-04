@@ -33,8 +33,12 @@ export async function initTransformers() {
 
         // Set backend to either 'webgpu' or 'wasm'
         try {
-            await transformers.env.setBackend(device);
-            log.info('Transformers backend set', device);
+            if (transformers.env && typeof transformers.env.setBackend === 'function') {
+                await transformers.env.setBackend(device);
+                log.info('Transformers backend set', device);
+            } else {
+                log.warn('Transformers env.setBackend not available on this build; continuing without explicit backend set.');
+            }
         } catch (e) {
             log.warn('Failed to set Transformers backend:', e?.message || e);
         }

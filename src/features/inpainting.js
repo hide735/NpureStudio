@@ -192,14 +192,40 @@ export async function performInpainting(imageElement, maskImageData, prompt, tra
         let analysisText = null;
         try {
             log.info('Calling analyzer pipeline', { promptSample: analysisPrompt.slice(0, 80), imageType: rawImage && (rawImage.constructor ? rawImage.constructor.name : typeof rawImage) });
+
+            const tryCalls = [
+                { name: 'image_then_options', desc: 'analyzer(image, {prompt, ...}) - preferred', fn: async () => analyzer(rawImage, { prompt: analysisPrompt, max_new_tokens: 256 }) },
+                { name: 'object_arg', desc: 'analyzer({image, prompt, ...}) - alternate single-object', fn: async () => analyzer({ image: rawImage, prompt: analysisPrompt, max_new_tokens: 256 }) },
+                { name: 'image_only', desc: 'analyzer(image) - ask model to caption without explicit prompt', fn: async () => analyzer(rawImage) }
+            ];
+
+            let out = null;
             const start = performance.now();
-            const out = await analyzer(analysisPrompt, { image: rawImage, max_new_tokens: 256 });
+            for (let i = 0; i < tryCalls.length; i++) {
+                const { name, desc, fn } = tryCalls[i];
+                try {
+                    log.info('Analyzer attempt start', { attempt: i + 1, name, desc, rawImageType: rawImage && (rawImage.constructor ? rawImage.constructor.name : typeof rawImage) });
+                    const attemptStart = performance.now();
+                    out = await fn();
+                    const attemptElapsed = (performance.now() - attemptStart).toFixed(1);
+                    log.info('Analyzer attempt succeeded', { attempt: i + 1, name, attemptElapsed });
+                    break;
+                } catch (e) {
+                    log.warn('Analyzer attempt failed', { attempt: i + 1, name, message: e?.message || e });
+                    // continue to next pattern
+                }
+            }
+
             const elapsed = (performance.now() - start).toFixed(1);
-            log.info(`Analyzer returned in ${elapsed}ms`);
-            analysisText = (typeof out === 'string') ? out : (out?.generated_text || JSON.stringify(out));
-            log.debug('Analyzer raw output', out);
+            log.info(`Analyzer finished attempts in ${elapsed}ms`);
+            if (out) {
+                analysisText = (typeof out === 'string') ? out : (out?.generated_text || JSON.stringify(out));
+                log.debug('Analyzer raw output', out);
+            } else {
+                log.warn('All analyzer invocation patterns failed');
+            }
         } catch (err) {
-            log.warn('Analyzer failed:', err?.message || err);
+            log.warn('Analyzer failed (outer):', err?.message || err);
             analysisText = null;
         }
 

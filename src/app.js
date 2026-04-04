@@ -230,7 +230,7 @@ class NpureStudio {
 
                 const inpaintResult = await performInpainting(this.personImage, this.personMaskImageData, stylePrompt, this.transformers, this.device);
 
-            if (inpaintResult instanceof HTMLImageElement) {
+                if (inpaintResult instanceof HTMLImageElement) {
                 this.drawImage(inpaintResult);
             } else if (inpaintResult instanceof ImageData) {
                 const outputCanvas = document.createElement('canvas');
@@ -241,6 +241,12 @@ class NpureStudio {
                 this.drawImage(outputCanvas);
             } else if (inpaintResult instanceof HTMLCanvasElement) {
                 this.drawImage(inpaintResult);
+                } else if (inpaintResult && typeof inpaintResult === 'object' && inpaintResult.dataURL) {
+                    // performInpainting may return { dataURL, width, height }
+                    const img = new Image();
+                    img.onload = () => this.drawImage(img);
+                    img.onerror = (e) => this.updateStatus('試着画像の読み込みに失敗しました', 'error');
+                    img.src = inpaintResult.dataURL;
             } else {
                 this.updateStatus('試着結果が予期しない形式です', 'error');
                 return;
