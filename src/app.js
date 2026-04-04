@@ -24,71 +24,29 @@ class NpureStudio {
         this.personImage = null;
         this.clothImage = null;
         this.personMaskImageData = null;
-
         this.init();
     }
 
     async init() {
-        this.setupCanvas();
-        this.setupEventListeners();
+        // UI and canvas setup
+        try { this.setupCanvas(); } catch (e) { console.warn('setupCanvas failed', e); }
+        try { this.setupEventListeners(); } catch (e) { console.warn('setupEventListeners failed', e); }
+
+        // Initialize debug state if present
         try { this.initDebugState(); } catch (e) { /* ignore */ }
 
+        // Initialize transformers environment (may be slow)
         try {
             const tf = await initTransformers();
             this.transformers = tf.transformers;
-            this.device = tf.device; // 'webgpu' or 'wasm'
+            this.device = tf.device;
             this.gpuDevice = tf.gpuDevice;
-
-            // Do NOT preload heavy models here. Load pipelines on demand when features are used.
             this.updateStatus('Transformers 環境を初期化しました。モデルは必要時に読み込みます。', 'success');
         } catch (err) {
-            this.updateStatus('初期化失敗: ' + err.message, 'error');
+            this.updateStatus('初期化失敗: ' + (err?.message || String(err)), 'error');
         }
 
         this.updateStatus('アプリが初期化されました');
-    }
-
-    setupCanvas() {
-        // キャンバスサイズをモバイル最適化
-        const rect = this.canvas.getBoundingClientRect();
-        this.canvas.width = rect.width;
-        this.canvas.height = rect.height;
-        this.maskCanvas.width = rect.width;
-        this.maskCanvas.height = rect.height;
-
-        // リサイズ対応
-        window.addEventListener('resize', () => {
-            const rect = this.canvas.getBoundingClientRect();
-            this.canvas.width = rect.width;
-            this.canvas.height = rect.height;
-            this.maskCanvas.width = rect.width;
-            this.maskCanvas.height = rect.height;
-        });
-    }
-
-    async waitForTransformers() {
-        return new Promise((resolve) => {
-            const check = () => {
-                if (window.transformers) {
-                    resolve();
-                } else {
-                    setTimeout(check, 100);
-                }
-            };
-            check();
-        });
-    }
-
-    setupEventListeners() {
-        this.personUpload.addEventListener('change', (e) => this.handlePersonUpload(e));
-        this.clothUpload.addEventListener('change', (e) => this.handleClothUpload(e));
-        this.segmentBtn.addEventListener('click', () => this.performSegmentation());
-        this.tryOnBtn.addEventListener('click', () => this.performTryOn());
-        this.resetBtn.addEventListener('click', () => this.resetApp());
-        this.canvas.addEventListener('click', (e) => this.handleCanvasClick(e));
-        if (this.debugToggle) {
-            this.debugToggle.addEventListener('change', (e) => this.handleDebugToggle(e));
-        }
     }
 
     async checkWebGPU() {
@@ -409,7 +367,8 @@ class NpureStudio {
             }
             const isLogit = (min < 0) || (max > 1.1);
             // Use a stricter threshold for logits to remove low-confidence noise
-            const threshold = isLogit ? 2.0 : 0.6;
+            // Increase logit threshold to reduce faint/full-body bleed into part masks
+            const threshold = isLogit ? 3.0 : 0.6;
 
             // 異なる色でマスクを描画（閾値で二値化してノイズを除去）
             const hue = (index * 137.5) % 360; // 黄金角で色を分散

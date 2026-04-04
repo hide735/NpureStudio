@@ -201,20 +201,22 @@ export async function segmentByPoint(imageElement, x, y, transformers, device = 
         await initSAM(transformers, device);
     }
 
-    // Resize input to a fixed square (512x512) to match processor/model expectations
+    // Resize input while preserving aspect ratio (do NOT force square resize).
+    // Forcing a square (e.g. 512x512) caused X/Y mapping errors when the
+    // displayed image is letterboxed within the canvas. Keep aspect ratio,
+    // then map the original click coords to the resized image pixels.
     const maxDimension = 512;
-    const targetSize = 512;
+    const resized = await resizeForAI(imageElement, maxDimension);
+
     const originalWidth = (imageElement.naturalWidth ?? imageElement.width) || imageElement.clientWidth || maxDimension;
     const originalHeight = (imageElement.naturalHeight ?? imageElement.height) || imageElement.clientHeight || maxDimension;
 
-    // Force exact target size (may change aspect ratio) so coordinate mapping is simple
-    const resized = await resizeForAI(imageElement, maxDimension, targetSize, targetSize);
-    const scaleX = targetSize / originalWidth;
-    const scaleY = targetSize / originalHeight;
+    const scaleX = resized.width / originalWidth;
+    const scaleY = resized.height / originalHeight;
     const adjX = Math.round(x * scaleX);
     const adjY = Math.round(y * scaleY);
 
-    // Prefer transformers.RawImage.fromCanvas if available
+    // Prefer transformers.RawImage.fromCanvas if available (use the resized canvas)
     let rawImage = null;
     if (transformers && transformers.RawImage && typeof transformers.RawImage.fromCanvas === 'function') {
         rawImage = await transformers.RawImage.fromCanvas(resized);
@@ -225,7 +227,9 @@ export async function segmentByPoint(imageElement, x, y, transformers, device = 
     log.info(`Running SAM inference at (scaled): ${adjX}, ${adjY} (orig: ${x}, ${y})`);
 
     try {
-        // SAM expects input_points as [[[y, x]]] and input_labels as [[label]]
+        // SAM expects input_points as [[[y, x]]] and input_labels as [[label]].
+        // We pass coordinates mapped to the resized image (adjY, adjX) so
+        // processor/model see the correct location without forcing a square resize.
         const inputs = await processor(rawImage, {
             input_points: [[[adjY, adjX]]],
             input_labels: [[1]]
@@ -260,8 +264,9 @@ export async function segmentByPoint(imageElement, x, y, transformers, device = 
                     }
                 }
 
-                // pick best mask by iou_scores if available, otherwise pick middle index
-                let chosenIndex = 0;
+                // pick best mask by iou_scores if available, otherwise prefer middle (Index 1)
+                // (SAM returns several scales; index 1 tends to correspond to part-level masks like clothing)
+                let chosenIndex = (numMasks > 1 ? Math.min(1, numMasks - 1) : 0);
                 try {
                     const scoresRaw = outputs && outputs.iou_scores ? outputs.iou_scores : null;
                     if (scoresRaw) {
@@ -382,7 +387,13 @@ export async function segmentByPoint(imageElement, x, y, transformers, device = 
                 const dims = pm2.dims || pm2.shape || [];
                 const h = dims.length >= 2 ? dims[dims.length - 2] : rawImage.height;
                 const w = dims.length >= 1 ? dims[dims.length - 1] : rawImage.width;
-                const dataCopy2 = new Float32Array(pm2.data.subarray ? pm2.data.subarray(0, h * w) : pm2.data.slice(0, h * w));
+                const total2 = pm2.data.length;
+                const pixelsPerMask2 = h * w;
+                // If multiple masks are present, prefer index 1 (part-level) when available
+                let start2 = 0;
+                if (total2 >= pixelsPerMask2 * 2) start2 = pixelsPerMask2;
+                const slice2 = pm2.data.subarray ? pm2.data.subarray(start2, start2 + pixelsPerMask2) : pm2.data.slice(start2, start2 + pixelsPerMask2);
+                const dataCopy2 = new Float32Array(slice2);
                 return { mask: { data: dataCopy2, width: w, height: h }, width: w, height: h };
             }
             return {
