@@ -1,8 +1,8 @@
-// import { initTransformers } from './core/transformers.js';
-import * as transformers from '../assets/transformers.min.js';
+import { initTransformers } from './core/transformers.js';
 import { initImageRecognition, classifyImage, isInitialized } from './features/image-recognition.js';
-import { initSegmentation, generateMask } from './features/segmentation.js';
+import { initSegmentation, generateMask, segmentByPoint } from './features/segmentation.js';
 import { initInpainting, performInpainting } from './features/inpainting.js';
+import { enableDebug, disableDebug } from './utils/debug.js';
 
 // NpureStudio メインアプリ
 class NpureStudio {
@@ -18,6 +18,8 @@ class NpureStudio {
         this.tryOnBtn = document.getElementById('try-on-btn');
         this.resetBtn = document.getElementById('reset-btn');
         this.inpaintPrompt = document.getElementById('inpaint-prompt');
+        this.debugToggle = document.getElementById('debug-toggle');
+        this.debugEnabled = false;
 
         this.personImage = null;
         this.clothImage = null;
@@ -29,15 +31,22 @@ class NpureStudio {
     async init() {
         this.setupCanvas();
         this.setupEventListeners();
+        try { this.initDebugState(); } catch (e) { /* ignore */ }
 
-        if (await this.checkWebGPU()) {
-            try {
-                await initImageRecognition(transformers);
-                await initSegmentation(transformers);
-                this.updateStatus('AIモデルが初期化されました', 'success');
-            } catch (err) {
-                this.updateStatus('初期化失敗: ' + err.message, 'error');
-            }
+        try {
+            const tf = await initTransformers();
+            this.transformers = tf.transformers;
+            this.device = tf.device; // 'webgpu' or 'wasm'
+            this.gpuDevice = tf.gpuDevice;
+
+            // Initialize feature models/pipelines with the shared transformers instance
+            await initImageRecognition(this.transformers, this.device);
+            await initSegmentation(this.transformers, this.device);
+            await initInpainting(this.transformers, this.device);
+
+            this.updateStatus('AIモデルが初期化されました', 'success');
+        } catch (err) {
+            this.updateStatus('初期化失敗: ' + err.message, 'error');
         }
 
         this.updateStatus('アプリが初期化されました');
@@ -80,6 +89,10 @@ class NpureStudio {
         this.segmentBtn.addEventListener('click', () => this.performSegmentation());
         this.tryOnBtn.addEventListener('click', () => this.performTryOn());
         this.resetBtn.addEventListener('click', () => this.resetApp());
+        this.canvas.addEventListener('click', (e) => this.handleCanvasClick(e));
+        if (this.debugToggle) {
+            this.debugToggle.addEventListener('change', (e) => this.handleDebugToggle(e));
+        }
     }
 
     async checkWebGPU() {
@@ -121,7 +134,7 @@ class NpureStudio {
                 if (isInitialized()) {
                     try {
                         this.updateStatus('人物画像を分析中...');
-                        const results = await classifyImage(img, transformers);
+                        const results = await classifyImage(img, this.transformers, this.device);
                         this.displayClassificationResults(results);
                     } catch (error) {
                         this.updateStatus('画像分析に失敗しました: ' + error.message, 'error');
@@ -182,15 +195,15 @@ class NpureStudio {
             return;
         }
 
-        try {
-            this.updateStatus('人物セグメンテーションを実行中...');
-            const result = await generateMask(this.personImage, transformers);
-            this.drawMask(result);
-            this.personMaskImageData = this.buildMaskImageData(result);
-            this.updateStatus('セグメンテーション完了', 'success');
-        } catch (error) {
-            this.updateStatus('セグメンテーション失敗: ' + error.message, 'error');
-        }
+            try {
+                this.updateStatus('人物セグメンテーションを実行中...');
+                const result = await generateMask(this.personImage, this.transformers, this.device);
+                this.drawMask(result);
+                this.personMaskImageData = this.buildMaskImageData(result);
+                this.updateStatus('セグメンテーション完了', 'success');
+            } catch (error) {
+                this.updateStatus('セグメンテーション失敗: ' + error.message, 'error');
+            }
     }
 
     async performTryOn() {
@@ -209,13 +222,13 @@ class NpureStudio {
 
         const prompt = this.inpaintPrompt.value || `Try on clothing from reference image.`;
 
-        try {
-            this.updateStatus('試着（インペイント）を実行中...');
+            try {
+                this.updateStatus('試着（インペイント）を実行中...');
 
-            // 衣服画像をプロンプトに追加してスタイルを反映（簡易対応）
-            const stylePrompt = `${prompt} Wear clothes matching the reference garment.`;
+                // 衣服画像をプロンプトに追加してスタイルを反映（簡易対応）
+                const stylePrompt = `${prompt} Wear clothes matching the reference garment.`;
 
-            const inpaintResult = await performInpainting(this.personImage, this.personMaskImageData, stylePrompt, transformers);
+                const inpaintResult = await performInpainting(this.personImage, this.personMaskImageData, stylePrompt, this.transformers, this.device);
 
             if (inpaintResult instanceof HTMLImageElement) {
                 this.drawImage(inpaintResult);
@@ -428,6 +441,64 @@ class NpureStudio {
     updateStatus(message, type = 'info') {
         this.statusDiv.textContent = message;
         this.statusDiv.className = type;
+    }
+    handleDebugToggle(event) {
+        const checked = event.target.checked;
+        try {
+            if (checked) {
+                enableDebug();
+                this.updateStatus('デバッグモードを有効化', 'info');
+            } else {
+                disableDebug();
+                this.updateStatus('デバッグモードを無効化', 'info');
+            }
+            this.debugEnabled = !!checked;
+        } catch (e) {
+            console.warn('Failed to toggle debug mode', e);
+        }
+    }
+
+    initDebugState() {
+        try {
+            const hasFlag = (typeof window !== 'undefined' && window.NPURE_DEBUG === true) ||
+                (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem('npure_debug') === '1');
+            if (this.debugToggle) this.debugToggle.checked = !!hasFlag;
+            if (hasFlag) enableDebug(); else disableDebug();
+            this.debugEnabled = !!hasFlag;
+        } catch (e) {
+            // ignore localStorage errors
+        }
+    }
+    // app.js のクラス内（メソッドとして追加）
+    async handleCanvasClick(event) {
+        if (!this.personImage) return;
+
+        // 1. キャンバス上のクリック座標を、実際の画像上の座標に変換
+        const rect = this.canvas.getBoundingClientRect();
+        const scaleX = this.personImage.width / rect.width;
+        const scaleY = this.personImage.height / rect.height;
+        const x = (event.clientX - rect.left) * scaleX;
+        const y = (event.clientY - rect.top) * scaleY;
+
+        try {
+            this.updateStatus('クリック地点を解析中...');
+            
+            // 2. 作成した segmentByPoint を呼び出す（transformers を渡す）
+            const result = await segmentByPoint(this.canvas, x, y, this.transformers, this.device);
+
+            // 3. マスクを描画 (既存の drawMask メソッドを利用)
+            // API: segmentByPoint は { mask, width, height } を返します
+            if (result && result.mask) {
+                const mask = result.mask;
+                this.drawMask([{ mask: { data: mask.data, width: result.width || mask.width, height: result.height || mask.height } }]);
+            } else {
+                this.updateStatus('マスクが生成されませんでした', 'error');
+            }
+            
+            this.updateStatus('セグメンテーション完了', 'success');
+        } catch (error) {
+            this.updateStatus('解析失敗: ' + error.message, 'error');
+        }
     }
 }
 

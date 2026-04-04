@@ -1,53 +1,53 @@
 // src/features/image-recognition.js
 // 基本画像認識機能（ViT モデルを使用）
 
-let classifier = null;
+import { createLogger } from '../utils/debug.js';
+import { htmlImageToRawImage } from '../utils/image-utils.js';
 
-export async function initImageRecognition(transformers) {
+let classifier = null;
+const log = createLogger('image-recognition');
+
+export async function initImageRecognition(transformers, device = null) {
+    if (!transformers) throw new Error('transformers instance required');
     try {
-        // 自動ロード設定: ローカルモデルを許可せず、リモートから自動ダウンロード
         transformers.env.allowLocalModels = false;
         transformers.env.allowRemoteModels = true;
 
-        // WebGPU優先: iPhoneのパワーを活用
-        const device = navigator.gpu ? 'webgpu' : 'cpu';
-        console.log(`Using device: ${device}`);
+        const dev = device || (navigator.gpu ? 'webgpu' : 'wasm');
+        log.info(`Using device: ${dev}`);
 
-        // ViT (Vision Transformer) モデルをロード
         classifier = await transformers.pipeline('image-classification', 'Xenova/vit-base-patch16-224', {
-            device: device
+            device: dev
         });
-        console.log('Image recognition model loaded successfully');
+        log.info('Image recognition model loaded successfully');
         return true;
     } catch (error) {
-        console.error('Failed to load image recognition model:', error);
+        log.error('Failed to load image recognition model:', error);
         throw error;
     }
 }
 
-export async function classifyImage(imageElement, transformers) {
-    // 1. もしモデルがまだロードされていなければ、ここでロードする
+export async function classifyImage(imageElement, transformers, device = null) {
+    if (!transformers) throw new Error('transformers instance required');
+
     if (!classifier) {
-        console.log("Loading AI model for the first time...");
-        const device = navigator.gpu ? 'webgpu' : 'cpu';
-        classifier = await transformers.pipeline('image-classification', 'Xenova/vit-base-patch16-224', {
-            device: device
-        });
+        log.info('Loading AI model for the first time...');
+        const dev = device || (navigator.gpu ? 'webgpu' : 'wasm');
+        classifier = await transformers.pipeline('image-classification', 'Xenova/vit-base-patch16-224', { device: dev });
     }
 
-    // 2. HTMLImageElement を Canvas に描画
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
     canvas.width = imageElement.width;
     canvas.height = imageElement.height;
     ctx.drawImage(imageElement, 0, 0);
 
-    // 3. Canvas から RawImage を作成（堅牢な方法）
-    const rawImage = await transformers.RawImage.fromCanvas(canvas);
+    const rawImage = await htmlImageToRawImage(transformers, canvas);
+    log.debug('Classify image input prepared', { type: rawImage && (rawImage.constructor ? rawImage.constructor.name : typeof rawImage) });
 
-    // 4. 推論を実行
     return await classifier(rawImage);
 }
+
 export function isInitialized() {
     return classifier !== null;
 }
