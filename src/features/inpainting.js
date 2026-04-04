@@ -108,6 +108,20 @@ export async function initInpainting(transformers, device = null) {
     return analyzer;
 }
 
+/**
+ * Dispose inpainting analyzer pipeline (free resources).
+ */
+export async function disposeInpainting() {
+    try {
+        if (analyzer && typeof analyzer.dispose === 'function') {
+            await analyzer.dispose();
+        }
+    } catch (e) {
+        console.warn('disposeInpainting failed:', e?.message || e);
+    }
+    analyzer = null;
+}
+
 function applySimpleBlurToRect(ctx, rect) {
     const { x, y, w, h } = rect;
     const tmp = document.createElement('canvas');

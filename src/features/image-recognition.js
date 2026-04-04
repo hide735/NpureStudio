@@ -51,3 +51,17 @@ export async function classifyImage(imageElement, transformers, device = null) {
 export function isInitialized() {
     return classifier !== null;
 }
+
+/**
+ * Dispose image recognition pipeline to free resources.
+ */
+export async function disposeImageRecognition() {
+    try {
+        if (classifier && typeof classifier.dispose === 'function') {
+            await classifier.dispose();
+        }
+    } catch (e) {
+        console.warn('disposeImageRecognition failed:', e?.message || e);
+    }
+    classifier = null;
+}

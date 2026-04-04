@@ -39,12 +39,8 @@ class NpureStudio {
             this.device = tf.device; // 'webgpu' or 'wasm'
             this.gpuDevice = tf.gpuDevice;
 
-            // Initialize feature models/pipelines with the shared transformers instance
-            await initImageRecognition(this.transformers, this.device);
-            await initSegmentation(this.transformers, this.device);
-            await initInpainting(this.transformers, this.device);
-
-            this.updateStatus('AIモデルが初期化されました', 'success');
+            // Do NOT preload heavy models here. Load pipelines on demand when features are used.
+            this.updateStatus('Transformers 環境を初期化しました。モデルは必要時に読み込みます。', 'success');
         } catch (err) {
             this.updateStatus('初期化失敗: ' + err.message, 'error');
         }
@@ -481,20 +477,25 @@ class NpureStudio {
         const y = (event.clientY - rect.top) * scaleY;
 
         try {
-            this.updateStatus('クリック地点を解析中...');
+            console.info('Canvas clicked at', { x, y });
+            this.updateStatus('SAMモデルを準備・解析中... (初回は数秒〜数十秒かかります)', 'info');
             
             // 2. 作成した segmentByPoint を呼び出す（transformers を渡す）
-            const result = await segmentByPoint(this.canvas, x, y, this.transformers, this.device);
+            const result = await segmentByPoint(this.personImage, x, y, this.transformers, this.device);
+            console.info('segmentByPoint result received', result);
 
             // 3. マスクを描画 (既存の drawMask メソッドを利用)
             // API: segmentByPoint は { mask, width, height } を返します
             if (result && result.mask) {
                 const mask = result.mask;
+                console.info('Drawing mask from segmentByPoint result', { mask, width: result.width, height: result.height });
                 this.drawMask([{ mask: { data: mask.data, width: result.width || mask.width, height: result.height || mask.height } }]);
             } else {
+                console.warn('マスクが生成されませんでした', result);
                 this.updateStatus('マスクが生成されませんでした', 'error');
             }
             
+            console.info('セグメンテーション完了');
             this.updateStatus('セグメンテーション完了', 'success');
         } catch (error) {
             this.updateStatus('解析失敗: ' + error.message, 'error');

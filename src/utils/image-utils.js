@@ -62,6 +62,50 @@ export function preprocessImage(img) {
     return imageToTensor(img, 224, 224);
 }
 
+/**
+ * Resize image so its longest edge does not exceed `maxDimension`.
+ * Returns an HTMLCanvasElement containing the resized image (or a canvas
+ * with the same size if no resize was necessary).
+ */
+export function resizeForAI(imageElement, maxDimension = 512) {
+    const srcWidth = (imageElement.naturalWidth ?? imageElement.width ?? imageElement.clientWidth) || 0;
+    const srcHeight = (imageElement.naturalHeight ?? imageElement.height ?? imageElement.clientHeight) || 0;
+
+    let width = srcWidth;
+    let height = srcHeight;
+
+    if (width === 0 || height === 0) {
+        // Fallback: try reading bounding client rect
+        const rect = imageElement.getBoundingClientRect ? imageElement.getBoundingClientRect() : { width: 0, height: 0 };
+        width = width || Math.round(rect.width) || maxDimension;
+        height = height || Math.round(rect.height) || maxDimension;
+    }
+
+    // Only resize if one dimension exceeds maxDimension
+    if (width > maxDimension || height > maxDimension) {
+        if (width >= height) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+        } else {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+        }
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+        ctx.imageSmoothingEnabled = true;
+        try { if ('imageSmoothingQuality' in ctx) ctx.imageSmoothingQuality = 'high'; } catch (e) { /* ignore */ }
+        ctx.drawImage(imageElement, 0, 0, width, height);
+    }
+
+    console.debug(`resizeForAI: ${srcWidth}x${srcHeight} -> ${width}x${height}`);
+    return canvas;
+}
+
 import { createLogger } from './debug.js';
 
 export async function htmlImageToRawImage(transformers, img) {
