@@ -378,15 +378,50 @@ class NpureStudio {
 
             // マスクデータをImageDataに変換
             const imageData = maskCtx.createImageData(maskData.width, maskData.height);
-            for (let i = 0; i < maskData.data.length; i++) {
-                const value = maskData.data[i] * 255;
-                // 異なる色でマスクを描画
-                const hue = (index * 137.5) % 360; // 黄金角で色を分散
-                const rgb = this.hslToRgb(hue / 360, 0.5, 0.5);
+
+            // データ長と幅・高さの整合性チェック
+            const totalPixels = maskData.data ? maskData.data.length : 0;
+            const expected = maskData.width * maskData.height;
+            if (totalPixels !== expected) {
+                console.warn('Mask length mismatch:', { totalPixels, expected });
+                console.log('Mask data length:', totalPixels);
+                console.log('Expected length:', expected);
+                // 試しに平方根で正方形を推定
+                const side = Math.round(Math.sqrt(totalPixels));
+                if (side * side === totalPixels) {
+                    maskData.width = side;
+                    maskData.height = side;
+                } else if (maskData.width && Math.ceil(totalPixels / maskData.width) * maskData.width === totalPixels) {
+                    maskData.height = Math.ceil(totalPixels / maskData.width);
+                } else {
+                    // 最終手段で高さを切り上げ
+                    maskData.height = Math.ceil(totalPixels / (maskData.width || 1));
+                }
+            }
+
+            // ロジットか確率かを判定して閾値を決める
+            const data = maskData.data;
+            let min = Infinity, max = -Infinity;
+            for (let i = 0; i < data.length; i++) {
+                const v = data[i];
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+            const isLogit = (min < 0) || (max > 1.1);
+            // Use a stricter threshold for logits to remove low-confidence noise
+            const threshold = isLogit ? 2.0 : 0.6;
+
+            // 異なる色でマスクを描画（閾値で二値化してノイズを除去）
+            const hue = (index * 137.5) % 360; // 黄金角で色を分散
+            const rgb = this.hslToRgb(hue / 360, 0.5, 0.5);
+            for (let i = 0; i < data.length; i++) {
+                const v = data[i];
+                const isTarget = isLogit ? (v > threshold) : (v >= threshold);
+                const alpha = isTarget ? 255 : 0;
                 imageData.data[i * 4] = rgb[0];     // R
                 imageData.data[i * 4 + 1] = rgb[1]; // G
                 imageData.data[i * 4 + 2] = rgb[2]; // B
-                imageData.data[i * 4 + 3] = value;   // A
+                imageData.data[i * 4 + 3] = alpha;   // A
             }
 
             maskCtx.putImageData(imageData, 0, 0);

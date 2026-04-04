@@ -22,9 +22,9 @@ export async function initSAM(transformers, forceDevice = null) {
     const modelId = 'Xenova/slimsam-77-uniform';
     // 安定性優先でデフォルトを WASM にする（必要なら forceDevice='webgpu' を渡す）
     var dev = forceDevice || 'wasm';
-    dev = `wasm`; // 一時的な検証用
+    dev = 'wasm'; // 一時的に WebGPU 版は不安定なので強制的に WASM に切り替え（2024-06 現在）
     var dtype = isiOS() ? 'fp16' : (dev === 'webgpu' ? 'q8' : 'fp32');
-    dtype = `fp32`; // 一時的な検証用
+    dtype = 'fp32'; // 一時的に WebGPU 版は不安定なので iOS 以外も強制的に fp16 に切り替え（2024-06 現在）
 
     log.info(`Initializing SAM: ${modelId} on ${dev} (${dtype})`);
     try {
@@ -125,8 +125,6 @@ export async function generateMask(imageElement, transformers, device = null) {
     ctx.fillRect(0, 0, modelSize, modelSize);
     ctx.drawImage(resized, offsetX, offsetY, drawWidth, drawHeight);
 
-    const imageData = ctx.getImageData(0, 0, modelSize, modelSize);
-
     const rawImage = await htmlImageToRawImage(transformers, canvas);
 
     try {
@@ -147,8 +145,8 @@ export async function generateMask(imageElement, transformers, device = null) {
                     } else if (Array.isArray(mask)) {
                         dataCopy = Float32Array.from(mask);
                     }
-                    const width = (mask && (mask.width || mask.dims && mask.dims[mask.dims.length - 1])) || canvas.width;
-                    const height = (mask && (mask.height || mask.dims && mask.dims[mask.dims.length - 2])) || canvas.height;
+                    const width = (mask && (mask.width || (mask.dims && mask.dims[mask.dims.length - 1]))) || canvas.width;
+                    const height = (mask && (mask.height || (mask.dims && mask.dims[mask.dims.length - 2]))) || canvas.height;
                     safeResult.push({ ...seg, mask: { data: dataCopy, width, height } });
                 } catch (e) {
                     // If something fails copying one segment, still include original
@@ -160,8 +158,8 @@ export async function generateMask(imageElement, transformers, device = null) {
             try {
                 const mask = result && result.mask ? result.mask : result;
                 const dataCopy = mask && mask.data ? new Float32Array(mask.data) : null;
-                const width = (mask && (mask.width || mask.dims && mask.dims[mask.dims.length - 1])) || canvas.width;
-                const height = (mask && (mask.height || mask.dims && mask.dims[mask.dims.length - 2])) || canvas.height;
+                const width = (mask && (mask.width || (mask.dims && mask.dims[mask.dims.length - 1]))) || canvas.width;
+                const height = (mask && (mask.height || (mask.dims && mask.dims[mask.dims.length - 2]))) || canvas.height;
                 safeResult.push({ ...result, mask: { data: dataCopy, width, height } });
             } catch (e) {
                 safeResult.push(result);
@@ -203,16 +201,19 @@ export async function segmentByPoint(imageElement, x, y, transformers, device = 
         await initSAM(transformers, device);
     }
 
-    // Resize input aggressively to avoid GPU/OOM; scale point coordinates accordingly
+    // Resize input to a fixed square (512x512) to match processor/model expectations
     const maxDimension = 512;
+    const targetSize = 512;
     const originalWidth = (imageElement.naturalWidth ?? imageElement.width) || imageElement.clientWidth || maxDimension;
     const originalHeight = (imageElement.naturalHeight ?? imageElement.height) || imageElement.clientHeight || maxDimension;
 
-    const resized = await resizeForAI(imageElement, maxDimension);
-    const scaleX = resized.width / originalWidth;
-    const scaleY = resized.height / originalHeight;
+    // Force exact target size (may change aspect ratio) so coordinate mapping is simple
+    const resized = await resizeForAI(imageElement, maxDimension, targetSize, targetSize);
+    const scaleX = targetSize / originalWidth;
+    const scaleY = targetSize / originalHeight;
     const adjX = Math.round(x * scaleX);
     const adjY = Math.round(y * scaleY);
+
     // Prefer transformers.RawImage.fromCanvas if available
     let rawImage = null;
     if (transformers && transformers.RawImage && typeof transformers.RawImage.fromCanvas === 'function') {
@@ -231,37 +232,114 @@ export async function segmentByPoint(imageElement, x, y, transformers, device = 
         });
         const outputs = await model(inputs);
 
-        log.info('SAM inference "await model" completed');
+        log.info('SAM inference completed');
 
-        // Copy mask data to plain typed array so it remains valid after disposing model
+        // Extract a single mask from outputs.pred_masks (SAM often returns multiple masks)
         let maskObj = null;
         try {
             const pm = outputs && outputs.pred_masks ? outputs.pred_masks : null;
             if (pm) {
-                if (pm.data) {
-                    const dataCopy = new Float32Array(pm.data);
-                    const dims = pm.dims || [];
-                    const height = dims.length >= 2 ? dims[dims.length - 2] : rawImage.height;
-                    const width = dims.length >= 1 ? dims[dims.length - 1] : rawImage.width;
-                    maskObj = { data: dataCopy, width, height };
-                } else if (Array.isArray(pm)) {
-                    // hit: an array of masks
-                    const first = pm[0];
-                    if (first && first.data) {
-                        maskObj = { data: new Float32Array(first.data), width: first.width || rawImage.width, height: first.height || rawImage.height };
-                    } else {
-                        maskObj = { data: Float32Array.from(pm), width: rawImage.width, height: rawImage.height };
+                const dims = pm.dims || pm.shape || [];
+                let numMasks = 1;
+                let height = null;
+                let width = null;
+
+                if (Array.isArray(dims) && dims.length >= 3) {
+                    if (dims.length === 4 && dims[0] === 1) {
+                        numMasks = dims[1];
+                        height = dims[2];
+                        width = dims[3];
+                    } else if (dims.length === 3) {
+                        numMasks = dims[0];
+                        height = dims[1];
+                        width = dims[2];
+                    } else if (dims.length === 2) {
+                        numMasks = 1;
+                        height = dims[0];
+                        width = dims[1];
                     }
+                }
+
+                // pick best mask by iou_scores if available, otherwise pick middle index
+                let chosenIndex = 0;
+                try {
+                    const scoresRaw = outputs && outputs.iou_scores ? outputs.iou_scores : null;
+                    if (scoresRaw) {
+                        let scores = null;
+                        if (scoresRaw.data) scores = Array.from(scoresRaw.data);
+                        else if (Array.isArray(scoresRaw)) scores = scoresRaw.slice();
+                        else if (typeof scoresRaw.array === 'function') {
+                            const sarr = await scoresRaw.array();
+                            scores = Array.isArray(sarr[0]) ? sarr[0] : sarr;
+                        }
+                        if (Array.isArray(scores) && scores.length) {
+                            if (Array.isArray(scores[0])) scores = scores[0];
+                            let maxIdx = 0; let maxVal = -Infinity;
+                            for (let i = 0; i < scores.length; i++) {
+                                const v = Number(scores[i]);
+                                if (v > maxVal) { maxVal = v; maxIdx = i; }
+                            }
+                            chosenIndex = maxIdx;
+                            if (!numMasks || numMasks <= chosenIndex) numMasks = Math.max(numMasks, chosenIndex + 1);
+                        }
+                    }
+                } catch (e) {
+                    // ignore scoring errors
+                }
+
+                // If dims unknown, try inferring from data length
+                if ((!height || !width) && pm && pm.data && pm.data.length) {
+                    const total = pm.data.length;
+                    if (total % 3 === 0) {
+                        const per = total / 3;
+                        const side = Math.round(Math.sqrt(per));
+                        if (side * side === per) {
+                            numMasks = 3;
+                            height = height || side;
+                            width = width || side;
+                        }
+                    }
+                    if (!height || !width) {
+                        const side = Math.round(Math.sqrt(total));
+                        if (side * side === total) {
+                            numMasks = 1;
+                            height = height || side;
+                            width = width || side;
+                        }
+                    }
+                }
+
+                // Extract chosen mask
+                if (pm.data && pm.data.length) {
+                    const total = pm.data.length;
+                    const pixelsPerMask = (height && width) ? (height * width) : Math.floor(total / Math.max(1, numMasks));
+                    const start = Math.min(total - pixelsPerMask, Math.max(0, chosenIndex * pixelsPerMask));
+                    const slice = pm.data.subarray ? pm.data.subarray(start, start + pixelsPerMask) : pm.data.slice(start, start + pixelsPerMask);
+                    const dataCopy = new Float32Array(slice);
+                    maskObj = { data: dataCopy, width: width || pixelsPerMask, height: height || 1 };
                 } else if (typeof pm.array === 'function') {
                     const arr = await pm.array();
-                    const flat = Array.isArray(arr) && Array.isArray(arr[0]) ? arr.flat() : arr;
-                    maskObj = { data: new Float32Array(flat), width: rawImage.width, height: rawImage.height };
-                } else {
-                    try { maskObj = { data: new Float32Array(pm), width: rawImage.width, height: rawImage.height }; } catch (e) { maskObj = null; }
+                    let chosenMask = null;
+                    if (Array.isArray(arr)) {
+                        if (Array.isArray(arr[0]) && Array.isArray(arr[0][chosenIndex])) {
+                            chosenMask = arr[0][chosenIndex];
+                        } else if (Array.isArray(arr[chosenIndex])) {
+                            chosenMask = arr[chosenIndex];
+                        } else if (Array.isArray(arr[0]) && Array.isArray(arr[0][0])) {
+                            chosenMask = arr.flat(2)[chosenIndex];
+                        }
+                    }
+                    if (chosenMask) {
+                        const flat = (Array.isArray(chosenMask[0]) ? chosenMask.flat() : chosenMask);
+                        const dataCopy = new Float32Array(flat);
+                        const h = chosenMask.length;
+                        const w = Array.isArray(chosenMask[0]) ? chosenMask[0].length : Math.floor(flat.length / h);
+                        maskObj = { data: dataCopy, width: w, height: h };
+                    }
                 }
             }
         } catch (e) {
-            console.warn('Failed to copy pred_masks:', e?.message || e);
+            console.warn('Failed to copy/select pred_masks:', e?.message || e);
         }
 
         // Explicitly dispose heavy tensors if API exposes dispose()
@@ -273,8 +351,8 @@ export async function segmentByPoint(imageElement, x, y, transformers, device = 
 
         return {
             mask: maskObj,
-            width: rawImage.width,
-            height: rawImage.height
+            width: (maskObj && maskObj.width) || rawImage.width,
+            height: (maskObj && maskObj.height) || rawImage.height
         };
     } catch (error) {
         const msg = error?.message || String(error);
@@ -298,6 +376,15 @@ export async function segmentByPoint(imageElement, x, y, transformers, device = 
                 input_labels: [[1]]
             });
             const outputs2 = await model(inputs2);
+            // Try to extract same as above
+            const pm2 = outputs2 && outputs2.pred_masks ? outputs2.pred_masks : null;
+            if (pm2 && pm2.data) {
+                const dims = pm2.dims || pm2.shape || [];
+                const h = dims.length >= 2 ? dims[dims.length - 2] : rawImage.height;
+                const w = dims.length >= 1 ? dims[dims.length - 1] : rawImage.width;
+                const dataCopy2 = new Float32Array(pm2.data.subarray ? pm2.data.subarray(0, h * w) : pm2.data.slice(0, h * w));
+                return { mask: { data: dataCopy2, width: w, height: h }, width: w, height: h };
+            }
             return {
                 mask: outputs2.pred_masks,
                 width: rawImage.width,

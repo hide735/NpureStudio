@@ -67,7 +67,8 @@ export function preprocessImage(img) {
  * Returns an HTMLCanvasElement containing the resized image (or a canvas
  * with the same size if no resize was necessary).
  */
-export function resizeForAI(imageElement, maxDimension = 512) {
+export function resizeForAI(imageElement, maxDimension = 512, targetWidth = null, targetHeight = null) {
+    // Determine source size
     const srcWidth = (imageElement.naturalWidth ?? imageElement.width ?? imageElement.clientWidth) || 0;
     const srcHeight = (imageElement.naturalHeight ?? imageElement.height ?? imageElement.clientHeight) || 0;
 
@@ -81,14 +82,20 @@ export function resizeForAI(imageElement, maxDimension = 512) {
         height = height || Math.round(rect.height) || maxDimension;
     }
 
-    // Only resize if one dimension exceeds maxDimension
-    if (width > maxDimension || height > maxDimension) {
-        if (width >= height) {
-            height = Math.round((height * maxDimension) / width);
-            width = maxDimension;
-        } else {
-            width = Math.round((width * maxDimension) / height);
-            height = maxDimension;
+    // If explicit target size provided, force resize to that size (may change aspect ratio)
+    if (targetWidth && targetHeight) {
+        width = targetWidth;
+        height = targetHeight;
+    } else {
+        // Only resize if one dimension exceeds maxDimension (preserve aspect ratio)
+        if (width > maxDimension || height > maxDimension) {
+            if (width >= height) {
+                height = Math.round((height * maxDimension) / width);
+                width = maxDimension;
+            } else {
+                width = Math.round((width * maxDimension) / height);
+                height = maxDimension;
+            }
         }
     }
 
