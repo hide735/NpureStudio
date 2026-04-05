@@ -1,11 +1,12 @@
 export async function initWebGPU() {
     if (!navigator.gpu) {
-        throw new Error('WebGPU is not supported in this browser.');
+        throw new Error('WebGPU not supported');
     }
 
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) {
-        throw new Error('Failed to get WebGPU adapter.');
+        // Let callers decide how to fallback; throw so upstream can catch and switch to WASM
+        throw new Error('No Adapter');
     }
 
     const device = await adapter.requestDevice();

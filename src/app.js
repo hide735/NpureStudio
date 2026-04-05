@@ -3,6 +3,8 @@ import { initImageRecognition, classifyImage, isInitialized } from './features/i
 import { initSegmentation, generateMask, segmentByPoint } from './features/segmentation.js';
 import { initInpainting, performInpainting } from './features/inpainting.js';
 import { enableDebug, disableDebug } from './utils/debug.js';
+import { initTranslator, translate, disposeTranslator, isTranslatorInitialized } from './features/translator.js';
+import { initGenerator, generateImage, disposeGenerator, isGeneratorInitialized } from './features/generator.js';
 
 // NpureStudio メインアプリ
 class NpureStudio {
@@ -24,7 +26,42 @@ class NpureStudio {
         this.personImage = null;
         this.clothImage = null;
         this.personMaskImageData = null;
+        this.transformers = null;
+        this.device = null;
+        this.gpuDevice = null;
         this.init();
+    }
+
+    setupCanvas() {
+        if (!this.canvas) return;
+        const rect = this.canvas.getBoundingClientRect();
+        // Ensure integer sizes
+        this.canvas.width = Math.round(rect.width);
+        this.canvas.height = Math.round(rect.height);
+        if (this.maskCanvas) {
+            this.maskCanvas.width = Math.round(rect.width);
+            this.maskCanvas.height = Math.round(rect.height);
+        }
+
+        // Re-draw on resize and keep mask aligned
+        window.addEventListener('resize', () => {
+            try {
+                const r = this.canvas.getBoundingClientRect();
+                this.canvas.width = Math.round(r.width);
+                this.canvas.height = Math.round(r.height);
+                if (this.maskCanvas) {
+                    this.maskCanvas.width = Math.round(r.width);
+                    this.maskCanvas.height = Math.round(r.height);
+                }
+                if (this.personImage) this.drawImage(this.personImage);
+                if (this.personMaskImageData) {
+                    this.clearMask();
+                    try { this.maskCtx.putImageData(this.personMaskImageData, 0, 0); } catch (e) {}
+                }
+            } catch (e) {
+                console.warn('resize redraw failed', e);
+            }
+        });
     }
 
     async init() {
@@ -35,16 +72,8 @@ class NpureStudio {
         // Initialize debug state if present
         try { this.initDebugState(); } catch (e) { /* ignore */ }
 
-        // Initialize transformers environment (may be slow)
-        try {
-            const tf = await initTransformers();
-            this.transformers = tf.transformers;
-            this.device = tf.device;
-            this.gpuDevice = tf.gpuDevice;
-            this.updateStatus('Transformers 環境を初期化しました。モデルは必要時に読み込みます。', 'success');
-        } catch (err) {
-            this.updateStatus('初期化失敗: ' + (err?.message || String(err)), 'error');
-        }
+        // Note: Transformers and model pipelines are loaded lazily on-demand
+        // to avoid triggering network/GPU probing and large memory usage at page load.
 
         this.updateStatus('アプリが初期化されました');
     }
@@ -70,6 +99,27 @@ class NpureStudio {
         }
     }
 
+    // Ensure transformers environment is initialized. Returns true on success.
+    async ensureTransformers() {
+        if (this.transformers) return true;
+        try {
+            this.updateStatus('Transformers 環境を初期化中...', 'info');
+            const tf = await initTransformers();
+            this.transformers = tf.transformers;
+            this.device = tf.device;
+            this.gpuDevice = tf.gpuDevice;
+            this.updateStatus('Transformers 初期化完了', 'success');
+            return true;
+        } catch (e) {
+            console.warn('ensureTransformers failed:', e?.message || e);
+            this.transformers = null;
+            this.device = 'wasm';
+            this.gpuDevice = null;
+            this.updateStatus('Transformers 初期化に失敗しました（ネットワーク/CORS を確認してください）', 'error');
+            return false;
+        }
+    }
+
     async handlePersonUpload(event) {
         const files = event.target.files;
         if (!files || files.length === 0) return;
@@ -87,6 +137,8 @@ class NpureStudio {
 
                 if (isInitialized()) {
                     try {
+                        const ok = await this.ensureTransformers();
+                        if (!ok) return;
                         this.updateStatus('人物画像を分析中...');
                         const results = await classifyImage(img, this.transformers, this.device);
                         this.displayClassificationResults(results);
@@ -150,6 +202,8 @@ class NpureStudio {
         }
 
             try {
+                const ok = await this.ensureTransformers();
+                if (!ok) return;
                 this.updateStatus('人物セグメンテーションを実行中...');
                 const result = await generateMask(this.personImage, this.transformers, this.device);
                 this.drawMask(result);
@@ -177,12 +231,14 @@ class NpureStudio {
         const prompt = this.inpaintPrompt.value || `Try on clothing from reference image.`;
 
             try {
+                const ok = await this.ensureTransformers();
+                if (!ok) return;
                 this.updateStatus('試着（インペイント）を実行中...');
 
-                // 衣服画像をプロンプトに追加してスタイルを反映（簡易対応）
-                const stylePrompt = `${prompt} Wear clothes matching the reference garment.`;
+                    // 衣服画像をプロンプトに追加してスタイルを反映（簡易対応）
+                    const stylePrompt = `${prompt} Wear clothes matching the reference garment.`;
 
-                const inpaintResult = await performInpainting(this.personImage, this.personMaskImageData, stylePrompt, this.transformers, this.device);
+                    const inpaintResult = await performInpainting(this.personImage, this.personMaskImageData, stylePrompt, this.transformers, this.device, this.gpuDevice);
 
                 if (inpaintResult instanceof HTMLImageElement) {
                 this.drawImage(inpaintResult);
@@ -479,7 +535,8 @@ class NpureStudio {
         try {
             console.info('Canvas clicked at', { x, y });
             this.updateStatus('SAMモデルを準備・解析中... (初回は数秒〜数十秒かかります)', 'info');
-            
+            const ok = await this.ensureTransformers();
+            if (!ok) return;
             // 2. 作成した segmentByPoint を呼び出す（transformers を渡す）
             const result = await segmentByPoint(this.personImage, x, y, this.transformers, this.device);
             console.info('segmentByPoint result received', result);
@@ -499,6 +556,85 @@ class NpureStudio {
             this.updateStatus('セグメンテーション完了', 'success');
         } catch (error) {
             this.updateStatus('解析失敗: ' + error.message, 'error');
+        }
+    }
+
+    setupEventListeners() {
+        if (this.personUpload) this.personUpload.addEventListener('change', (e) => this.handlePersonUpload(e));
+        if (this.clothUpload) this.clothUpload.addEventListener('change', (e) => this.handleClothUpload(e));
+        if (this.segmentBtn) this.segmentBtn.addEventListener('click', () => this.performSegmentation());
+        if (this.tryOnBtn) this.tryOnBtn.addEventListener('click', () => this.performTryOn());
+        // Generate button (Text-to-Image)
+        this.generateBtn = document.getElementById('generate-btn');
+        if (this.generateBtn) this.generateBtn.addEventListener('click', () => this.handleGenerateClick());
+        if (this.resetBtn) this.resetBtn.addEventListener('click', () => this.resetApp());
+        if (this.canvas) this.canvas.addEventListener('click', (e) => this.handleCanvasClick(e));
+        if (this.debugToggle) this.debugToggle.addEventListener('change', (e) => this.handleDebugToggle(e));
+    }
+
+    async handleGenerateClick() {
+        const prompt = (this.inpaintPrompt && this.inpaintPrompt.value) ? this.inpaintPrompt.value : '';
+        if (!prompt || !prompt.trim()) {
+            this.updateStatus('プロンプトを入力してください', 'error');
+            return;
+        }
+
+        try {
+
+            // Ensure transformers and translator are initialized lazily.
+            const ok = await this.ensureTransformers();
+            if (!ok) return;
+
+            if (!isTranslatorInitialized()) {
+                this.updateStatus('翻訳パイプラインを初期化中（初回は時間がかかります）...', 'info');
+                try {
+                    await initTranslator(this.transformers, this.device);
+                    this.updateStatus('翻訳パイプライン初期化完了', 'success');
+                } catch (e) {
+                    console.error('Translator init failed:', e);
+                    this.updateStatus('翻訳パイプラインの初期化に失敗しました: ' + (e?.message || e), 'error');
+                    return;
+                }
+            }
+
+            // Lazily initialize generator on first use to avoid heavy memory
+            // allocation at startup (helps iPhone NPU/adapter stability).
+            if (!isGeneratorInitialized()) {
+                this.updateStatus('生成パイプラインを初期化中（初回は時間がかかります）...', 'info');
+                try {
+                    await initGenerator(this.transformers, this.device);
+                    this.updateStatus('生成パイプライン初期化完了', 'success');
+                } catch (e) {
+                    console.error('Generator init failed:', e);
+                    this.updateStatus('生成パイプラインの初期化に失敗しました: ' + (e?.message || e), 'error');
+                    return;
+                }
+            }
+
+            this.updateStatus('翻訳中...', 'info');
+            const enPrompt = await translate(prompt);
+
+            this.updateStatus('画像生成中 (WebGPU)...', 'info');
+            const resultCanvas = await generateImage(enPrompt);
+
+            if (resultCanvas instanceof HTMLCanvasElement) {
+                this.drawImage(resultCanvas);
+            } else if (resultCanvas instanceof HTMLImageElement) {
+                this.drawImage(resultCanvas);
+            } else if (typeof resultCanvas === 'string') {
+                const img = new Image();
+                img.onload = () => this.drawImage(img);
+                img.onerror = () => this.updateStatus('生成画像の読み込みに失敗しました', 'error');
+                img.src = resultCanvas;
+            } else {
+                console.warn('Unknown generation result type:', resultCanvas);
+                this.updateStatus('生成結果の形式が不明です', 'error');
+            }
+
+            this.updateStatus('生成完了', 'success');
+        } catch (err) {
+            console.error('Generate failed:', err);
+            this.updateStatus('生成失敗: ' + (err?.message || String(err)), 'error');
         }
     }
 }

@@ -1,7 +1,6 @@
 // src/features/inpainting.js
 // Qwen 系の image-to-text を解析器として使う軽量 inpainting ワークフロー
 
-import { initWebGPU } from '../core/webgpu.js';
 import { generateMask } from './segmentation.js';
 import { htmlImageToRawImage } from '../utils/image-utils.js';
 import { createLogger } from '../utils/debug.js';
@@ -132,16 +131,17 @@ function applySimpleBlurToRect(ctx, rect) {
     ctx.drawImage(tmp, 0, 0, tmp.width, tmp.height, x, y, w, h);
 }
 
-async function applyWebGPUBlurToRect(ctx, rect) {
-    if (!('gpu' in navigator)) {
+async function applyWebGPUBlurToRect(ctx, rect, gpuDevice = null) {
+    // Do not call navigator.gpu.requestAdapter() here. Use the gpuDevice
+    // object passed from initTransformers (via app) when available.
+    if (!gpuDevice) {
         applySimpleBlurToRect(ctx, rect);
         return;
     }
 
     try {
-        const { device } = await initWebGPU();
-        if (!device) throw new Error('No GPU device');
-
+        // Placeholder GPU path: currently perform a fast canvas-based blur.
+        // If a shader-based implementation is added, use the provided gpuDevice.
         const { x, y, w, h } = rect;
         const srcBitmap = await createImageBitmap(ctx.canvas, x, y, w, h);
         const off = document.createElement('canvas');
@@ -160,12 +160,12 @@ async function applyWebGPUBlurToRect(ctx, rect) {
         srcBitmap.close();
         return;
     } catch (err) {
-        console.warn('WebGPU blur failed, fallback to canvas blur:', err?.message || err);
+        console.warn('GPU-path blur failed, fallback to canvas blur:', err?.message || err);
         applySimpleBlurToRect(ctx, rect);
     }
 }
 
-export async function performInpainting(imageElement, maskImageData, prompt, transformers, device = null) {
+export async function performInpainting(imageElement, maskImageData, prompt, transformers, device = null, gpuDevice = null) {
     // Try to initialize analyzer but do not fail hard — fall back to segmentation-based flow
     if (!analyzer) {
         try {
@@ -286,8 +286,8 @@ export async function performInpainting(imageElement, maskImageData, prompt, tra
             h: Math.min(canvas.height, Math.floor(r.h || 0))
         };
         if (rect.w <= 0 || rect.h <= 0) continue;
-        // Try GPU path first, fallback to canvas
-        await applyWebGPUBlurToRect(ctx, rect);
+        // Try GPU path first (only when gpuDevice is provided), fallback to canvas
+        await applyWebGPUBlurToRect(ctx, rect, gpuDevice);
     }
 
     if (maskImageData) {
