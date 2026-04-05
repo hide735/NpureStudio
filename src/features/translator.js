@@ -14,65 +14,61 @@ const log = createLogger('translator');
 export async function initTranslator(transformers, device = null) {
     if (!transformers) throw new Error('transformers instance required');
     if (translator) return translator;
-    // Use the device explicitly passed from initTransformers; do not
-    // probe for adapters or call navigator.gpu.requestAdapter() here.
+
     const modelId = 'Xenova/t5-small';
-
-    // attemptInit: try to initialize translator for a specific device
     const tasks = ['translation', 'text2text-generation', 'text-generation'];
+
     async function attemptInit(devToTry) {
-        const tried = [];
         const dtype = devToTry === 'webgpu' ? 'fp16' : 'fp32';
-        log.info(`Initializing translator (${modelId}) on ${devToTry} (dtype=${dtype})`);
+        const opts = { device: devToTry, dtype };
+        const tried = [];
 
-        for (const task of tasks) {
-            try {
-                translator = await transformers.pipeline(task, modelId, { device: devToTry, dtype });
-                console.log('Translator pipeline loaded with task:', task);
-                log.info(`Translator pipeline loaded (task=${task})`);
-                return translator;
-            } catch (err) {
-                tried.push(`${task}: ${err?.message || String(err)}`);
-            }
-        }
-
-        // Fallback: try available AutoModel classes
-        try {
-            const AutoClass = transformers.AutoModelForSeq2SeqLM || transformers.AutoModelForSeq2Seq || transformers.AutoModel || null;
-            if (AutoClass && typeof AutoClass.from_pretrained === 'function') {
+        // Try pipeline() first (if available)
+        if (typeof transformers.pipeline === 'function') {
+            for (const task of tasks) {
                 try {
-                    const modelObj = await AutoClass.from_pretrained(modelId, { device: devToTry, dtype });
-                    translator = modelObj;
-                    console.log('Translator loaded via AutoClass.from_pretrained (object returned; may not be pipeline-callable)');
-                    log.info('Translator loaded via AutoClass.from_pretrained (object returned; may not be pipeline-callable)');
-                    return translator;
-                } catch (err) {
-                    tried.push(`auto-class.from_pretrained: ${err?.message || String(err)}`);
+                    const p = await transformers.pipeline(task, modelId, opts);
+                    if (p) return p;
+                } catch (e) {
+                    tried.push(`${task}: ${e?.message || String(e)}`);
                 }
-            } else {
-                tried.push('auto-class: unavailable');
             }
-        } catch (err) {
-            tried.push(`auto-class-check: ${err?.message || String(err)}`);
         }
 
-        const errMsg = 'Failed to initialize translator pipeline: ' + tried.join(' | ');
-        const e = new Error(errMsg);
-        e.details = tried;
-        throw e;
+        // Try AutoModel classes as fallback
+        const autoCandidates = [transformers.AutoModelForSeq2SeqLM, transformers.AutoModelForTranslation];
+        for (const C of autoCandidates) {
+            if (C && typeof C.from_pretrained === 'function') {
+                try {
+                    const m = await C.from_pretrained(modelId, opts);
+                    if (m) return m;
+                } catch (e) {
+                    tried.push(`auto(${C.name}): ${e?.message || String(e)}`);
+                }
+            }
+        }
+
+        const err = new Error('Failed to initialize translator: ' + tried.join(' | '));
+        err.details = tried;
+        throw err;
     }
 
-    // Normalize requested device and attempt initialization with fallback to wasm
-    const requestedDevice = device ?? 'wasm';
     try {
-        return await attemptInit(requestedDevice);
+        const inst = await attemptInit(device || 'wasm');
+        translator = inst;
+        log.info('Translator initialized on', device || 'wasm');
+        return translator;
     } catch (err) {
+        log.error('Translator init failed:', err?.message || err);
+
         const msg = (err && err.message) ? err.message : String(err || '');
-        if (requestedDevice !== 'wasm' && /adapter|no available|webgpu adapter not found|no adapter|no available adapters/i.test(msg)) {
-            log.warn('WebGPU adapter/backend error detected for translator, retrying with wasm:', msg);
-            return await attemptInit('wasm');
+        if (device !== 'wasm' && /adapter|no available|webgpu adapter not found|no adapter/i.test(msg)) {
+            log.warn('WebGPU issue detected, retrying translator init with wasm', msg);
+            const retry = await attemptInit('wasm');
+            translator = retry;
+            return translator;
         }
-        log.error('Failed to initialize translator:', msg);
+
         throw err;
     }
 }
@@ -87,17 +83,12 @@ export async function translate(text) {
     if (typeof text !== 'string' || text.trim() === '') return '';
 
     try {
-        console.debug('Translating text', text.slice(0, 120));
         log.debug('Translating text', text.slice(0, 120));
         const out = await translator(text, { max_new_tokens: 256 });
-        // 出力は配列または単一オブジェクトの可能性がある
         const first = Array.isArray(out) ? out[0] : out;
         if (!first) return '';
-        // translation pipeline は通常 `translation_text` キーを返す
         if (first.translation_text) return first.translation_text;
-        // 他のキー名の可能性に備える
         const val = first.translation_text || first.generated_text || Object.values(first)[0];
-        console.debug('Translation output', val);
         return typeof val === 'string' ? val : String(val);
     } catch (err) {
         log.error('Translation failed:', err?.message || err);

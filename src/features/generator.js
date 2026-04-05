@@ -65,43 +65,108 @@ export async function initGenerator(transformers, deviceOrOptions = {}, maybeOpt
     try {
         log.info('Stable Diffusion 用の特殊パイプラインを起動します...');
 
-        // Try authoritative AutoPipeline classes first, then fallback to transformers.pipeline
-        let pipelineInstance = null;
-        const AutoClass = transformers.AutoPipelineForText2Image || transformers.AutoPipelineForTextToImage || transformers.AutoPipelineForImageToImage || transformers.StableDiffusionPipeline || null;
-        if (AutoClass && typeof AutoClass.from_pretrained === 'function') {
-            pipelineInstance = await AutoClass.from_pretrained(modelId, Object.assign({}, pipelineOpts, { progress_callback }));
-        } else if (typeof transformers.pipeline === 'function') {
-            pipelineInstance = await transformers.pipeline('text-to-image', modelId, Object.assign({}, pipelineOpts, { progress_callback }));
-        } else {
-            throw new Error('No supported pipeline API available in transformers build');
+        // Attempts to initialize a text->image pipeline using available APIs.
+        async function attemptPipeline(devToTry) {
+            const tried = [];
+            const dtypeToUse = devToTry === 'webgpu' ? 'fp16' : 'fp32';
+            const opts = Object.assign({}, pipelineOpts, { device: devToTry, dtype: dtypeToUse });
+
+            // Try authoritative AutoPipeline/StableDiffusion classes first
+            const autoCandidates = [
+                transformers.StableDiffusionPipeline,
+                transformers.AutoPipelineForText2Image,
+                transformers.AutoPipelineForTextToImage,
+                transformers.AutoPipelineForImageToImage,
+            ];
+
+            for (const C of autoCandidates) {
+                if (C && typeof C.from_pretrained === 'function') {
+                    try {
+                        const inst = await C.from_pretrained(modelId, Object.assign({}, opts, { progress_callback }));
+                        if (inst) return inst;
+                    } catch (e) {
+                        tried.push(`auto(${C.name}): ${e?.message || String(e)}`);
+                    }
+                }
+            }
+
+            // If pipeline() function exists, try several likely task names
+            if (typeof transformers.pipeline === 'function') {
+                const pipelineTasks = ['text-to-image', 'image-to-image', 'stable-diffusion', 'image-generation'];
+                for (const task of pipelineTasks) {
+                    try {
+                        const p = await transformers.pipeline(task, modelId, Object.assign({}, opts, { progress_callback }));
+                        if (p) return p;
+                    } catch (e) {
+                        tried.push(`${task}: ${e?.message || String(e)}`);
+                    }
+                }
+            }
+
+            const e = new Error('Failed to initialize pipeline: ' + tried.join(' | '));
+            e.details = tried;
+            throw e;
         }
 
-        if (!pipelineInstance) throw new Error('Failed to initialize pipeline');
-
+        // Try requested device first; if it fails due to adapter/unavailable, we'll retry with wasm below.
+        const pipelineInstance = await attemptPipeline(device);
         generator = { type: 'pipeline', impl: pipelineInstance };
         return generator;
     } catch (err) {
         log.error('Generator init failed:', err?.message || err);
 
-        // If the error looks like a WebGPU adapter/backend availability issue,
-        // retry once with the `wasm` device to avoid hard-failing the app.
         const msg = (err && err.message) ? err.message : String(err || '');
+
+        // If model files are missing on Hugging Face (404 / resolve/main), optionally fall back to HF Inference API
+        if (/Could not locate file|resolve\/main|404|Not Found/i.test(msg)) {
+            if (options && options.hf_token) {
+                log.warn('Model files appear missing on HF; falling back to Hugging Face Inference API');
+                generator = { type: 'inference_api', impl: { modelId, token: options.hf_token, endpoint: options.hf_endpoint } };
+                return generator;
+            } else {
+                log.warn('Model files missing and no HF token provided; cannot fallback to Inference API');
+            }
+        }
+
+        // If the failure was due to WebGPU adapter/backend availability, retry once with wasm
         if (device !== 'wasm' && /adapter|no available|webgpu adapter not found|no adapter|no available adapters/i.test(msg)) {
             log.warn('WebGPU adapter/backend error detected, retrying generator init with wasm', msg);
             try {
                 const retryDevice = 'wasm';
-                const retryDtype = 'fp32';
-                const retryPipelineOpts = Object.assign({}, pipelineOpts, { device: retryDevice, dtype: retryDtype });
+                const pipelineInstance2 = await (async () => {
+                    try {
+                        return await (async function () {
+                            // reuse attemptPipeline but for wasm
+                            const dtypeToUse = 'fp32';
+                            const opts = Object.assign({}, pipelineOpts, { device: retryDevice, dtype: dtypeToUse });
 
-                let pipelineInstance2 = null;
-                const AutoClass2 = transformers.AutoPipelineForText2Image || transformers.AutoPipelineForTextToImage || transformers.AutoPipelineForImageToImage || transformers.StableDiffusionPipeline || null;
-                if (AutoClass2 && typeof AutoClass2.from_pretrained === 'function') {
-                    pipelineInstance2 = await AutoClass2.from_pretrained(modelId, Object.assign({}, retryPipelineOpts, { progress_callback }));
-                } else if (typeof transformers.pipeline === 'function') {
-                    pipelineInstance2 = await transformers.pipeline('text-to-image', modelId, Object.assign({}, retryPipelineOpts, { progress_callback }));
-                } else {
-                    throw new Error('No supported pipeline API available in transformers build for wasm retry');
-                }
+                            const autoCandidates = [
+                                transformers.StableDiffusionPipeline,
+                                transformers.AutoPipelineForText2Image,
+                                transformers.AutoPipelineForTextToImage,
+                                transformers.AutoPipelineForImageToImage,
+                            ];
+                            for (const C of autoCandidates) {
+                                if (C && typeof C.from_pretrained === 'function') {
+                                    try {
+                                        const inst = await C.from_pretrained(modelId, Object.assign({}, opts, { progress_callback }));
+                                        if (inst) return inst;
+                                    } catch (e) {}
+                                }
+                            }
+                            if (typeof transformers.pipeline === 'function') {
+                                const pipelineTasks = ['text-to-image', 'image-to-image', 'stable-diffusion', 'image-generation'];
+                                for (const task of pipelineTasks) {
+                                    try {
+                                        const p = await transformers.pipeline(task, modelId, Object.assign({}, opts, { progress_callback }));
+                                        if (p) return p;
+                                    } catch (e) {}
+                                }
+                            }
+                            return null;
+                        })();
+                    } catch (e) { return null; }
+                })();
 
                 if (!pipelineInstance2) throw new Error('Failed to initialize pipeline on wasm retry');
 
