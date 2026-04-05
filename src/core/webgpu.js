@@ -6,7 +6,7 @@ export async function initWebGPU() {
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) {
         // Let callers decide how to fallback; throw so upstream can catch and switch to WASM
-        throw new Error('No Adapter');
+        throw new Error('WebGPU adapter not found');
     }
 
     const device = await adapter.requestDevice();

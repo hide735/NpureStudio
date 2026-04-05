@@ -1,4 +1,3 @@
-import { initTransformers } from './core/transformers.js';
 import { initImageRecognition, classifyImage, isInitialized } from './features/image-recognition.js';
 import { initSegmentation, generateMask, segmentByPoint } from './features/segmentation.js';
 import { initInpainting, performInpainting } from './features/inpainting.js';
@@ -23,7 +22,9 @@ async function _loadFeatureModule(specifier) {
 
     // In production use cached module; in dev always re-import with cache-buster and update cache.
     if (!isDev && _featureModuleCache[resolved]) return _featureModuleCache[resolved];
-    const mod = await importWithCacheBuster(resolved, { cacheBuster: isDev });
+    // useVersion: true ensures a stable project version is appended in production;
+    // cacheBuster: isDev forces a timestamp during development.
+    const mod = await importWithCacheBuster(resolved, { cacheBuster: isDev, useVersion: true });
     _featureModuleCache[resolved] = mod;
     return mod;
 }
@@ -31,6 +32,7 @@ async function _loadFeatureModule(specifier) {
 // Translator wrappers (preserve original API names used elsewhere in this file)
 async function initTranslator(transformers, device) {
     console.log('Initializing translator with device:', device);
+    transformers.env.backends.onnx.logLevel = 'error';
     const m = await _loadFeatureModule('./features/translator.js');
     var res = m.initTranslator(transformers, device);
     console.log('Translator initialized:', !!res);
@@ -57,9 +59,15 @@ function isTranslatorInitialized() {
 }
 
 // Generator wrappers
-async function initGenerator(transformers, device, options) {
+async function initGenerator(transformers, device, options = {}) {
     const m = await _loadFeatureModule('./features/generator.js');
-    return m.initGenerator(transformers, device, options);
+    // Support both signatures in feature module: (transformers, options) and (transformers, device, options)
+    try {
+        return await m.initGenerator(transformers, device, options);
+    } catch (e) {
+        // Fallback: some versions accept (transformers, options)
+        return await m.initGenerator(transformers, Object.assign({}, options, { device }));
+    }
 }
 async function generateImage(prompt, options) {
     const m = await _loadFeatureModule('./features/generator.js');
@@ -146,6 +154,29 @@ class NpureStudio {
         // to avoid triggering network/GPU probing and large memory usage at page load.
 
         this.updateStatus('アプリが初期化されました');
+
+        // Eagerly initialize transformers, translator and generator once at startup.
+        // This prevents repeated init calls on each generate button press and
+        // ensures the determined `device` is passed into feature modules.
+        try {
+            const ok = await this.ensureTransformers();
+            if (ok) {
+                this.updateStatus('翻訳・生成パイプラインを初期化中...', 'info');
+                try {
+                    await initTranslator(this.transformers, this.device);
+                } catch (e) {
+                    console.warn('Startup translator init failed:', e);
+                }
+                try {
+                    await initGenerator(this.transformers, this.device, {});
+                } catch (e) {
+                    console.warn('Startup generator init failed:', e);
+                }
+                this.updateStatus('パイプライン初期化完了', 'success');
+            }
+        } catch (e) {
+            console.warn('Startup pipeline initialization failed:', e);
+        }
     }
 
     async checkWebGPU() {
@@ -174,7 +205,11 @@ class NpureStudio {
         if (this.transformers) return true;
         try {
             this.updateStatus('Transformers 環境を初期化中...', 'info');
-            const tf = await initTransformers();
+            // Dynamically load core/transformers.js with cache/version control so
+            // a browser refresh will fetch the latest file when NPURE_VERSION or
+            // dev cache-buster changes.
+            const core = await _loadFeatureModule('./core/transformers.js');
+            const tf = await core.initTransformers();
             this.transformers = tf.transformers;
             this.device = tf.device;
             this.gpuDevice = tf.gpuDevice;
@@ -651,37 +686,22 @@ class NpureStudio {
 
         try {
 
-            // Ensure transformers and translator are initialized lazily.
+            // Ensure transformers are available; translator/generator are
+            // initialized once at startup in `init()`. If they are missing,
+            // abort rather than re-initializing on every generate click.
             const ok = await this.ensureTransformers();
             if (!ok) return;
 
             if (!isTranslatorInitialized()) {
-                console.log('Translator not initialized, initializing now...');
-                this.updateStatus('翻訳パイプラインを初期化中（初回は時間がかかります）...', 'info');
-                try {
-                    console.log('Initializing translator with transformers and device:', this.transformers, this.device);
-                    await initTranslator(this.transformers, this.device);
-                    console.log('Translator initialized successfully.');
-                    this.updateStatus('翻訳パイプライン初期化完了', 'success');
-                } catch (e) {
-                    console.error('Translator init failed:', e);
-                    this.updateStatus('翻訳パイプラインの初期化に失敗しました: ' + (e?.message || e), 'error');
-                    return;
-                }
+                console.warn('Translator not initialized at generate time.');
+                this.updateStatus('翻訳パイプラインが初期化されていません', 'error');
+                return;
             }
 
-            // Lazily initialize generator on first use to avoid heavy memory
-            // allocation at startup (helps iPhone NPU/adapter stability).
             if (!isGeneratorInitialized()) {
-                this.updateStatus('生成パイプラインを初期化中（初回は時間がかかります）...', 'info');
-                try {
-                    await initGenerator(this.transformers, this.device);
-                    this.updateStatus('生成パイプライン初期化完了', 'success');
-                } catch (e) {
-                    console.error('Generator init failed:', e);
-                    this.updateStatus('生成パイプラインの初期化に失敗しました: ' + (e?.message || e), 'error');
-                    return;
-                }
+                console.warn('Generator not initialized at generate time.');
+                this.updateStatus('生成パイプラインが初期化されていません', 'error');
+                return;
             }
 
             this.updateStatus('翻訳中...', 'info');

@@ -8,15 +8,16 @@ const log = createLogger('generator');
 
 // Helper: set Authorization header on transformers env for HF private models
 async function _setTransformersAuth(transformers, token) {
-    try {
-        if (!transformers) return;
-        transformers.env = transformers.env || {};
-        transformers.env.fetch_options = transformers.env.fetch_options || { credentials: 'omit', mode: 'cors' };
-        transformers.env.fetch_options.headers = Object.assign({}, transformers.env.fetch_options.headers || {}, { Authorization: 'Bearer ' + token });
-        console.log('Transformers fetch_options Authorization header set');
-    } catch (e) {
-        console.warn('Failed to set transformers auth header:', e?.message || e);
-    }
+ //   try {
+ //       if (!transformers) return;
+ //       transformers.env = transformers.env || {};
+ //       transformers.env.fetch_options = transformers.env.fetch_options || { credentials: 'omit', mode: 'cors' };
+ //       transformers.env.fetch_options.headers = Object.assign({}, transformers.env.fetch_options.headers || {}, { Authorization: 'Bearer ' + token });
+ //       console.log('Transformers fetch_options Authorization header set');
+ //   } catch (e) {
+ //       console.warn('Failed to set transformers auth header:', e?.message || e);
+ //   }
+    return;
 }
 
 // Helper: fallback to Hugging Face Inference API (returns Blob)
@@ -33,128 +34,87 @@ async function _hfInferenceImage(modelId, prompt, token, endpoint) {
     return blob;
 }
 
-export async function initGenerator(transformers, device = null, options = {}) {
-    if (!transformers && !options.useONNX) throw new Error('transformers instance required or set options.useONNX:true');
+/**
+ * 初期化: transformers のインスタンスを受け取り、device とオプションを扱える互換的な実装
+ * 呼び出し形式を2つサポートします:
+ *  - initGenerator(transformers, options)
+ *  - initGenerator(transformers, device, options)
+ */
+export async function initGenerator(transformers, deviceOrOptions = {}, maybeOptions = {}) {
+    if (!transformers) return;
     if (generator) return generator;
 
-    const dev = device ?? 'wasm';
+    // Normalize parameters
+    let device = 'webgpu';
+    let options = {};
+    if (typeof deviceOrOptions === 'string') {
+        device = deviceOrOptions;
+        options = maybeOptions || {};
+    } else if (deviceOrOptions && typeof deviceOrOptions === 'object') {
+        options = deviceOrOptions || {};
+        device = options.device || 'webgpu';
+    }
 
-    // 1) Try transformers pipeline if available
-    if (transformers) {
-        const tried = [];
-        try {
-            const modelId = options.modelId || 'onnx-community/sd-turbo-onnx';
-            const progressCallback = options.progress_callback || ((p) => { try { log.info(`Generator progress: ${Math.round((p || 0) * 100)}%`); } catch (e) {} });
-            // prefer fp16 on webgpu devices when possible
-            const dtype = (dev === 'webgpu') ? (options.dtype || 'fp16') : (options.dtype || 'fp32');
-            const pipelineOpts = Object.assign({ device: dev, dtype }, options.pipelineOptions || {});
+    const dtype = device === 'webgpu' ? (options.dtype || 'fp16') : (options.dtype || 'fp32');
+    const pipelineOpts = Object.assign({ device, dtype }, options.pipelineOptions || {});
+    const modelId = options.modelId || 'onnx-community/stable-diffusion-v1-5-ONNX';
+    const progress_callback = options.progress_callback || ((p) => { try { log.info(`Generator progress: ${Math.round((p || 0) * 100)}%`); } catch (e) {} });
 
-            // HF token (can be passed via options.hfToken or read from window/localStorage)
-            const hfToken = options.hfToken || (typeof window !== 'undefined' && (window.NPURE_HF_TOKEN || (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem('npure_hf_token')))) || null;
-            let authApplied = false;
+    log.info(`Initializing generator: ${modelId} on ${device}`);
 
-            console.log(`Initializing generator pipeline with model: ${modelId} on device: ${dev} (dtype=${dtype})`);
+    try {
+        log.info('Stable Diffusion 用の特殊パイプラインを起動します...');
 
-            // Try several candidate task names — some builds expose `image-to-image` rather than `text-to-image`.
-            const candidateTasks = ['image-to-image', 'text-to-image', 'image-to-image'];
-            const tasks = Array.from(new Set(candidateTasks));
-            let pipeline = null;
+        // Try authoritative AutoPipeline classes first, then fallback to transformers.pipeline
+        let pipelineInstance = null;
+        const AutoClass = transformers.AutoPipelineForText2Image || transformers.AutoPipelineForTextToImage || transformers.AutoPipelineForImageToImage || transformers.StableDiffusionPipeline || null;
+        if (AutoClass && typeof AutoClass.from_pretrained === 'function') {
+            pipelineInstance = await AutoClass.from_pretrained(modelId, Object.assign({}, pipelineOpts, { progress_callback }));
+        } else if (typeof transformers.pipeline === 'function') {
+            pipelineInstance = await transformers.pipeline('text-to-image', modelId, Object.assign({}, pipelineOpts, { progress_callback }));
+        } else {
+            throw new Error('No supported pipeline API available in transformers build');
+        }
 
-            for (const task of tasks) {
-                try {
-                    console.log(`Attempting to load pipeline with task "${task}"`);
-                    pipeline = await transformers.pipeline(task, modelId, Object.assign({}, pipelineOpts, { progress_callback: progressCallback }));
-                    if (pipeline) {
-                        console.log(`Loaded pipeline for task ${task}`);
-                        break;
-                    }
-                } catch (e) {
-                    console.warn(`pipeline(${task}) failed:`, e?.message || e);
-                    tried.push(`pipeline(${task}): ${e?.message || String(e)}`);
-                    // If the failure looks like unauthorized and we have a token, set auth header and retry once
-                    if (!authApplied && hfToken && /unauthori|401|Unauthorized/i.test(e?.message || '')) {
-                        console.log('Unauthorized detected; applying HF token and retrying pipeline');
-                        await _setTransformersAuth(transformers, hfToken);
-                        authApplied = true;
-                        try {
-                            pipeline = await transformers.pipeline(task, modelId, Object.assign({}, pipelineOpts, { progress_callback: progressCallback }));
-                            if (pipeline) {
-                                console.log(`Loaded pipeline for task ${task} after applying auth`);
-                                break;
-                            }
-                        } catch (e2) {
-                            console.warn(`Retry after auth failed for ${task}:`, e2?.message || e2);
-                            tried.push(`pipeline(${task})-auth: ${e2?.message || String(e2)}`);
-                        }
-                    }
+        if (!pipelineInstance) throw new Error('Failed to initialize pipeline');
+
+        generator = { type: 'pipeline', impl: pipelineInstance };
+        return generator;
+    } catch (err) {
+        log.error('Generator init failed:', err?.message || err);
+
+        // If the error looks like a WebGPU adapter/backend availability issue,
+        // retry once with the `wasm` device to avoid hard-failing the app.
+        const msg = (err && err.message) ? err.message : String(err || '');
+        if (device !== 'wasm' && /adapter|no available|webgpu adapter not found|no adapter|no available adapters/i.test(msg)) {
+            log.warn('WebGPU adapter/backend error detected, retrying generator init with wasm', msg);
+            try {
+                const retryDevice = 'wasm';
+                const retryDtype = 'fp32';
+                const retryPipelineOpts = Object.assign({}, pipelineOpts, { device: retryDevice, dtype: retryDtype });
+
+                let pipelineInstance2 = null;
+                const AutoClass2 = transformers.AutoPipelineForText2Image || transformers.AutoPipelineForTextToImage || transformers.AutoPipelineForImageToImage || transformers.StableDiffusionPipeline || null;
+                if (AutoClass2 && typeof AutoClass2.from_pretrained === 'function') {
+                    pipelineInstance2 = await AutoClass2.from_pretrained(modelId, Object.assign({}, retryPipelineOpts, { progress_callback }));
+                } else if (typeof transformers.pipeline === 'function') {
+                    pipelineInstance2 = await transformers.pipeline('text-to-image', modelId, Object.assign({}, retryPipelineOpts, { progress_callback }));
+                } else {
+                    throw new Error('No supported pipeline API available in transformers build for wasm retry');
                 }
-            }
 
-            // Fallback: try the xenova AutoPipelineForTextToImage (single authoritative fallback)
-            if (!pipeline) {
-                try {
-                    console.log('Falling back to AutoPipelineForTextToImage (single-class fallback)');
-                    const AutoPipeline = transformers.AutoPipelineForTextToImage || transformers.AutoPipelineForImageToImage || transformers.StableDiffusionPipeline || null;
-                    if (AutoPipeline && typeof AutoPipeline.from_pretrained === 'function') {
-                        try {
-                            pipeline = await AutoPipeline.from_pretrained(modelId, Object.assign({}, pipelineOpts, { progress_callback: progressCallback }));
-                            if (pipeline) {
-                                console.log('Loaded model via AutoPipeline.from_pretrained');
-                            }
-                        } catch (e) {
-                            console.warn('AutoPipeline.from_pretrained failed:', e?.message || e);
-                            tried.push(`AutoPipeline.from_pretrained: ${e?.message || String(e)}`);
-                            // retry with auth if unauthorized and token present
-                            if (!authApplied && hfToken && /unauthori|401|Unauthorized/i.test(e?.message || '')) {
-                                console.log('Unauthorized detected during AutoPipeline.from_pretrained; applying HF token and retrying');
-                                await _setTransformersAuth(transformers, hfToken);
-                                authApplied = true;
-                                try {
-                                    pipeline = await AutoPipeline.from_pretrained(modelId, Object.assign({}, pipelineOpts, { progress_callback: progressCallback }));
-                                } catch (e2) {
-                                    console.warn('AutoPipeline.from_pretrained (auth retry) failed:', e2?.message || e2);
-                                    tried.push(`AutoPipeline.from_pretrained-auth: ${e2?.message || String(e2)}`);
-                                }
-                            }
-                        }
-                    } else {
-                        tried.push('AutoPipelineForTextToImage: unavailable');
-                    }
-                } catch (e) {
-                    console.warn('AutoPipeline fallback failed:', e?.message || e);
-                    tried.push(`auto-pipeline-check: ${e?.message || String(e)}`);
-                }
-            }
+                if (!pipelineInstance2) throw new Error('Failed to initialize pipeline on wasm retry');
 
-            if (pipeline) {
-                console.log('Generator pipeline loaded');
-                generator = { type: 'pipeline', impl: pipeline };
-                log.info('Generator pipeline loaded');
+                generator = { type: 'pipeline', impl: pipelineInstance2 };
                 return generator;
-            } else {
-                console.log('No text/image pipeline available via transformers. Errors:', tried.join(' | '));
-                const summary = tried.join(' | ') || 'unknown error';
-                log.warn('Pipeline text-to-image unavailable, errors:', summary);
+            } catch (err2) {
+                log.error('Generator init retry with wasm failed:', err2?.message || err2);
+                throw err2;
             }
-        } catch (err) {
-            console.log('Unexpected error during generator pipeline initialization:', err?.message || err);
-            log.warn('Pipeline text-to-image unavailable, unexpected error:', err?.message || err);
         }
-    }
 
-    // Optionally fall back to HF Inference API if requested and token provided
-    if (options.allowInferenceFallback) {
-        const hfToken = options.hfToken || (typeof window !== 'undefined' && (window.NPURE_HF_TOKEN || (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem('npure_hf_token')))) || null;
-        if (hfToken) {
-            console.log('Falling back to Hugging Face Inference API for text-to-image (inference fallback enabled)');
-            generator = { type: 'inference_api', impl: { modelId: options.modelId || 'onnx-community/sd-turbo-onnx', token: hfToken, endpoint: options.hfInferenceEndpoint } };
-            return generator;
-        }
+        throw err;
     }
-
-    // No pipeline available via transformers; include diagnostic hint
-    console.log('No supported text-to-image pipeline available via transformers. If you expected this to work, check the console for diagnostics about which pipeline/task names were attempted and any errors encountered during initialization.');
-    throw new Error('No supported text-to-image pipeline available via transformers (see console for diagnostics)');
 }
 
 export async function generateImage(prompt, options = {}) {
