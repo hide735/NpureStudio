@@ -19,31 +19,76 @@ export async function initTransformers() {
         }
     }
 
-    try {
-        log.info('Importing transformers.js from CDN');
-        const transformers = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3');
-        if (!transformers) {
-            throw new Error('Failed to import transformers module');
-        }
+    // Try multiple CDN sources (pin to a xenova build known to include image pipelines)
+    const candidates = [
+        'https://cdn.jsdelivr.net/npm/@xenova/transformers@3.0.0-alpha.20/dist/transformers.min.js'
+    ];
 
-        // Configure environment defaults once
-        transformers.env.allowLocalModels = false;
-        transformers.env.allowRemoteModels = true;
-        transformers.env.fetch_options = { credentials: 'omit', mode: 'cors' };
-
-        // Set backend to either 'webgpu' or 'wasm'
+    let transformers = null;
+    let lastError = null;
+    for (const src of candidates) {
         try {
-            transformers.env.backends.onnx.wasm.proxy = false;
-            // await transformers.env.setBackend(device);
-            log.info('Transformers backend set', device);
-        } catch (e) {
-            log.warn('Failed to set Transformers backend:', e?.message || e);
-        }
+            log.info('Attempting to import transformers from', src);
+            const mod = await import(src);
 
-        log.info('Transformers initialized successfully');
-        return { transformers, device, gpuDevice };
-    } catch (err) {
-        console.error('Transformers.js initialization failed', err);
-        throw err;
+            transformers = mod.default || mod; // support both default and named exports
+            if (transformers) {
+                transformers.env.allowLocalModels = false;
+                transformers.env.allowRemoteModels = true;
+                transformers.env.fetch_options = {
+                    credentials: 'omit',
+                    mode: 'cors'
+                };
+                log.info('Transformers environment configured with omit-credentials');
+                log.info('Transformers module imported successfully from', src);
+                break;
+            }
+        } catch (e) {
+            lastError = e;
+            log.warn(`Import failed from ${src}: ${e?.message || e}`);
+        }
     }
+
+    if (!transformers) {
+        log.error('Failed to import transformers module from CDN', lastError);
+        throw lastError || new Error('Failed to import transformers module');
+    }
+
+    // Diagnostic: expose some useful info to console for debugging pipeline availability
+    try {
+        try { console.log('transformers exports:', Object.keys(transformers)); } catch (e) {}
+        try { console.log('transformers.AutoPipelineForTextToImage:', transformers.AutoPipelineForTextToImage); } catch (e) {}
+    } catch (e) {}
+
+    // Configure environment defaults once (do this immediately so any subsequent model fetch
+    // performed by the transformers runtime will use these fetch options)
+    try {
+        transformers.env = transformers.env || {};
+    } catch (e) {
+        log.warn('Failed to configure transformers.env:', e?.message || e);
+    }
+
+    // Configure ONNX backend preferences and set backend to either 'webgpu' or 'wasm'
+    try {
+        transformers.env.backends = transformers.env.backends || {};
+        transformers.env.backends.onnx = transformers.env.backends.onnx || {};
+        // disable wasm proxy fetch if present
+        transformers.env.backends.onnx.wasm = transformers.env.backends.onnx.wasm || {};
+        transformers.env.backends.onnx.wasm.proxy = false;
+        // if WebGPU is available, hint transformers to prefer the onnx webgpu backend
+        if (device === 'webgpu') {
+            transformers.env.backends.onnx.webgpu = transformers.env.backends.onnx.webgpu || {};
+            transformers.env.backends.onnx.webgpu.enabled = true;
+        }
+        // Instruct transformers to select the backend if the helper exists
+        if (typeof transformers.env.setBackend === 'function') {
+            await transformers.env.setBackend(device);
+        }
+        log.info('Transformers backend configured', device);
+    } catch (e) {
+        log.warn('Failed to set Transformers backend:', e?.message || e);
+    }
+
+    log.info('Transformers initialized successfully');
+    return { transformers, device, gpuDevice };
 }

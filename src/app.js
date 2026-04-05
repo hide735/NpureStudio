@@ -3,8 +3,78 @@ import { initImageRecognition, classifyImage, isInitialized } from './features/i
 import { initSegmentation, generateMask, segmentByPoint } from './features/segmentation.js';
 import { initInpainting, performInpainting } from './features/inpainting.js';
 import { enableDebug, disableDebug } from './utils/debug.js';
-import { initTranslator, translate, disposeTranslator, isTranslatorInitialized } from './features/translator.js';
-import { initGenerator, generateImage, disposeGenerator, isGeneratorInitialized } from './features/generator.js';
+import { importWithCacheBuster } from './utils/module-loader.js';
+
+// Dynamic feature module loader with automatic cache-busting for development / hot reload
+const _featureModuleCache = {};
+async function _loadFeatureModule(specifier) {
+    // Resolve specifier relative to this module (`app.js`) so callers can pass
+    // './features/translator.js' and have it resolve to '/src/features/...',
+    // not relative to the loader module's location.
+    const resolved = (typeof specifier === 'string') ? new URL(specifier, import.meta.url).href : specifier;
+    // Determine development mode: prefer explicit debug flag or localhost
+    const isDev = (() => {
+        try {
+            if (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem('npure_debug') === '1') return true;
+            if (typeof location !== 'undefined' && (location.hostname === 'localhost' || location.hostname === '127.0.0.1')) return true;
+        } catch (e) {}
+        return false;
+    })();
+
+    // In production use cached module; in dev always re-import with cache-buster and update cache.
+    if (!isDev && _featureModuleCache[resolved]) return _featureModuleCache[resolved];
+    const mod = await importWithCacheBuster(resolved, { cacheBuster: isDev });
+    _featureModuleCache[resolved] = mod;
+    return mod;
+}
+
+// Translator wrappers (preserve original API names used elsewhere in this file)
+async function initTranslator(transformers, device) {
+    console.log('Initializing translator with device:', device);
+    const m = await _loadFeatureModule('./features/translator.js');
+    var res = m.initTranslator(transformers, device);
+    console.log('Translator initialized:', !!res);
+    return res;
+}
+async function translate(text) {
+    console.log('Translating:', text);
+    const m = await _loadFeatureModule('./features/translator.js');
+    var res = m.translate(text);
+    console.log('Translation result:', res);
+    return res;
+}
+async function disposeTranslator() {
+    console.log('Disposing translator');
+    const key = new URL('./features/translator.js', import.meta.url).href;
+    const m = _featureModuleCache[key];
+    if (m && typeof m.disposeTranslator === 'function') return m.disposeTranslator();
+}
+function isTranslatorInitialized() {
+    console.log('Checking if translator is initialized');
+    const key = new URL('./features/translator.js', import.meta.url).href;
+    const m = _featureModuleCache[key];
+    return !!(m && typeof m.isTranslatorInitialized === 'function' && m.isTranslatorInitialized());
+}
+
+// Generator wrappers
+async function initGenerator(transformers, device, options) {
+    const m = await _loadFeatureModule('./features/generator.js');
+    return m.initGenerator(transformers, device, options);
+}
+async function generateImage(prompt, options) {
+    const m = await _loadFeatureModule('./features/generator.js');
+    return m.generateImage(prompt, options);
+}
+async function disposeGenerator() {
+    const key = new URL('./features/generator.js', import.meta.url).href;
+    const m = _featureModuleCache[key];
+    if (m && typeof m.disposeGenerator === 'function') return m.disposeGenerator();
+}
+function isGeneratorInitialized() {
+    const key = new URL('./features/generator.js', import.meta.url).href;
+    const m = _featureModuleCache[key];
+    return !!(m && typeof m.isGeneratorInitialized === 'function' && m.isGeneratorInitialized());
+}
 
 // NpureStudio メインアプリ
 class NpureStudio {
@@ -586,9 +656,12 @@ class NpureStudio {
             if (!ok) return;
 
             if (!isTranslatorInitialized()) {
+                console.log('Translator not initialized, initializing now...');
                 this.updateStatus('翻訳パイプラインを初期化中（初回は時間がかかります）...', 'info');
                 try {
+                    console.log('Initializing translator with transformers and device:', this.transformers, this.device);
                     await initTranslator(this.transformers, this.device);
+                    console.log('Translator initialized successfully.');
                     this.updateStatus('翻訳パイプライン初期化完了', 'success');
                 } catch (e) {
                     console.error('Translator init failed:', e);

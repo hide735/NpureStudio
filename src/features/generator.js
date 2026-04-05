@@ -6,6 +6,33 @@ import { createLogger } from '../utils/debug.js';
 let generator = null;
 const log = createLogger('generator');
 
+// Helper: set Authorization header on transformers env for HF private models
+async function _setTransformersAuth(transformers, token) {
+    try {
+        if (!transformers) return;
+        transformers.env = transformers.env || {};
+        transformers.env.fetch_options = transformers.env.fetch_options || { credentials: 'omit', mode: 'cors' };
+        transformers.env.fetch_options.headers = Object.assign({}, transformers.env.fetch_options.headers || {}, { Authorization: 'Bearer ' + token });
+        console.log('Transformers fetch_options Authorization header set');
+    } catch (e) {
+        console.warn('Failed to set transformers auth header:', e?.message || e);
+    }
+}
+
+// Helper: fallback to Hugging Face Inference API (returns Blob)
+async function _hfInferenceImage(modelId, prompt, token, endpoint) {
+    const url = endpoint || `https://api-inference.huggingface.co/models/${modelId}`;
+    const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+    const body = JSON.stringify({ inputs: prompt });
+    const resp = await fetch(url, { method: 'POST', headers, body });
+    if (!resp.ok) {
+        const txt = await resp.text().catch(() => '');
+        throw new Error(`HF Inference API failed: ${resp.status} ${txt}`);
+    }
+    const blob = await resp.blob();
+    return blob;
+}
+
 export async function initGenerator(transformers, device = null, options = {}) {
     if (!transformers && !options.useONNX) throw new Error('transformers instance required or set options.useONNX:true');
     if (generator) return generator;
@@ -14,35 +41,120 @@ export async function initGenerator(transformers, device = null, options = {}) {
 
     // 1) Try transformers pipeline if available
     if (transformers) {
+        const tried = [];
         try {
             const modelId = options.modelId || 'onnx-community/sd-turbo-onnx';
-            const progressCallback = (p) => {
-                try { log.info(`Generator progress: ${Math.round((p || 0) * 100)}%`); } catch (e) {}
-            };
-            const pipelineOpts = Object.assign({ device: dev, dtype: 'fp16' }, options.pipelineOptions || {});
-            const pipeline = await transformers.pipeline('text-to-image', modelId, Object.assign({}, pipelineOpts, { progress_callback: progressCallback }));
-            generator = { type: 'pipeline', impl: pipeline };
-            log.info('Generator pipeline loaded');
-            return generator;
+            const progressCallback = options.progress_callback || ((p) => { try { log.info(`Generator progress: ${Math.round((p || 0) * 100)}%`); } catch (e) {} });
+            // prefer fp16 on webgpu devices when possible
+            const dtype = (dev === 'webgpu') ? (options.dtype || 'fp16') : (options.dtype || 'fp32');
+            const pipelineOpts = Object.assign({ device: dev, dtype }, options.pipelineOptions || {});
+
+            // HF token (can be passed via options.hfToken or read from window/localStorage)
+            const hfToken = options.hfToken || (typeof window !== 'undefined' && (window.NPURE_HF_TOKEN || (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem('npure_hf_token')))) || null;
+            let authApplied = false;
+
+            console.log(`Initializing generator pipeline with model: ${modelId} on device: ${dev} (dtype=${dtype})`);
+
+            // Try several candidate task names — some builds expose `image-to-image` rather than `text-to-image`.
+            const candidateTasks = ['image-to-image', 'text-to-image', 'image-to-image'];
+            const tasks = Array.from(new Set(candidateTasks));
+            let pipeline = null;
+
+            for (const task of tasks) {
+                try {
+                    console.log(`Attempting to load pipeline with task "${task}"`);
+                    pipeline = await transformers.pipeline(task, modelId, Object.assign({}, pipelineOpts, { progress_callback: progressCallback }));
+                    if (pipeline) {
+                        console.log(`Loaded pipeline for task ${task}`);
+                        break;
+                    }
+                } catch (e) {
+                    console.warn(`pipeline(${task}) failed:`, e?.message || e);
+                    tried.push(`pipeline(${task}): ${e?.message || String(e)}`);
+                    // If the failure looks like unauthorized and we have a token, set auth header and retry once
+                    if (!authApplied && hfToken && /unauthori|401|Unauthorized/i.test(e?.message || '')) {
+                        console.log('Unauthorized detected; applying HF token and retrying pipeline');
+                        await _setTransformersAuth(transformers, hfToken);
+                        authApplied = true;
+                        try {
+                            pipeline = await transformers.pipeline(task, modelId, Object.assign({}, pipelineOpts, { progress_callback: progressCallback }));
+                            if (pipeline) {
+                                console.log(`Loaded pipeline for task ${task} after applying auth`);
+                                break;
+                            }
+                        } catch (e2) {
+                            console.warn(`Retry after auth failed for ${task}:`, e2?.message || e2);
+                            tried.push(`pipeline(${task})-auth: ${e2?.message || String(e2)}`);
+                        }
+                    }
+                }
+            }
+
+            // Fallback: try the xenova AutoPipelineForTextToImage (single authoritative fallback)
+            if (!pipeline) {
+                try {
+                    console.log('Falling back to AutoPipelineForTextToImage (single-class fallback)');
+                    const AutoPipeline = transformers.AutoPipelineForTextToImage || transformers.AutoPipelineForImageToImage || transformers.StableDiffusionPipeline || null;
+                    if (AutoPipeline && typeof AutoPipeline.from_pretrained === 'function') {
+                        try {
+                            pipeline = await AutoPipeline.from_pretrained(modelId, Object.assign({}, pipelineOpts, { progress_callback: progressCallback }));
+                            if (pipeline) {
+                                console.log('Loaded model via AutoPipeline.from_pretrained');
+                            }
+                        } catch (e) {
+                            console.warn('AutoPipeline.from_pretrained failed:', e?.message || e);
+                            tried.push(`AutoPipeline.from_pretrained: ${e?.message || String(e)}`);
+                            // retry with auth if unauthorized and token present
+                            if (!authApplied && hfToken && /unauthori|401|Unauthorized/i.test(e?.message || '')) {
+                                console.log('Unauthorized detected during AutoPipeline.from_pretrained; applying HF token and retrying');
+                                await _setTransformersAuth(transformers, hfToken);
+                                authApplied = true;
+                                try {
+                                    pipeline = await AutoPipeline.from_pretrained(modelId, Object.assign({}, pipelineOpts, { progress_callback: progressCallback }));
+                                } catch (e2) {
+                                    console.warn('AutoPipeline.from_pretrained (auth retry) failed:', e2?.message || e2);
+                                    tried.push(`AutoPipeline.from_pretrained-auth: ${e2?.message || String(e2)}`);
+                                }
+                            }
+                        }
+                    } else {
+                        tried.push('AutoPipelineForTextToImage: unavailable');
+                    }
+                } catch (e) {
+                    console.warn('AutoPipeline fallback failed:', e?.message || e);
+                    tried.push(`auto-pipeline-check: ${e?.message || String(e)}`);
+                }
+            }
+
+            if (pipeline) {
+                console.log('Generator pipeline loaded');
+                generator = { type: 'pipeline', impl: pipeline };
+                log.info('Generator pipeline loaded');
+                return generator;
+            } else {
+                console.log('No text/image pipeline available via transformers. Errors:', tried.join(' | '));
+                const summary = tried.join(' | ') || 'unknown error';
+                log.warn('Pipeline text-to-image unavailable, errors:', summary);
+            }
         } catch (err) {
-            log.warn('Pipeline text-to-image unavailable, falling back to ONNX if requested:', err?.message || err);
+            console.log('Unexpected error during generator pipeline initialization:', err?.message || err);
+            log.warn('Pipeline text-to-image unavailable, unexpected error:', err?.message || err);
         }
     }
 
-    // 2) Fallback to ONNX runtime if requested
-    if (!options.onnxModelUrl) options.onnxModelUrl = 'tools/onnx_prototype/models/small_unet.onnx';
-    const onnxUrl = options.onnxModelUrl;
-    try {
-        const ort = await loadOrtRuntime();
-        log.info('onnxruntime-web loaded', !!ort);
-        const session = await createOnnxSession(ort, onnxUrl);
-        generator = { type: 'onnx', impl: { ort, session } };
-        log.info('ONNX generator initialized using ' + onnxUrl);
-        return generator;
-    } catch (e) {
-        log.error('Failed to initialize ONNX generator:', e?.message || e);
-        throw e;
+    // Optionally fall back to HF Inference API if requested and token provided
+    if (options.allowInferenceFallback) {
+        const hfToken = options.hfToken || (typeof window !== 'undefined' && (window.NPURE_HF_TOKEN || (typeof localStorage !== 'undefined' && localStorage.getItem && localStorage.getItem('npure_hf_token')))) || null;
+        if (hfToken) {
+            console.log('Falling back to Hugging Face Inference API for text-to-image (inference fallback enabled)');
+            generator = { type: 'inference_api', impl: { modelId: options.modelId || 'onnx-community/sd-turbo-onnx', token: hfToken, endpoint: options.hfInferenceEndpoint } };
+            return generator;
+        }
     }
+
+    // No pipeline available via transformers; include diagnostic hint
+    console.log('No supported text-to-image pipeline available via transformers. If you expected this to work, check the console for diagnostics about which pipeline/task names were attempted and any errors encountered during initialization.');
+    throw new Error('No supported text-to-image pipeline available via transformers (see console for diagnostics)');
 }
 
 export async function generateImage(prompt, options = {}) {
@@ -51,7 +163,20 @@ export async function generateImage(prompt, options = {}) {
 
     if (generator.type === 'pipeline') {
         try {
-            const out = await generator.impl(prompt, options);
+            const opts = Object.assign({ num_inference_steps: 4, guidance_scale: 7.5 }, options);
+            if (options && options.progress_callback) opts.progress_callback = options.progress_callback;
+
+            let out = null;
+            if (typeof generator.impl === 'function') {
+                out = await generator.impl(prompt, opts);
+            } else if (generator.impl && typeof generator.impl.generate === 'function') {
+                out = await generator.impl.generate(prompt, opts);
+            } else if (generator.impl && typeof generator.impl.call === 'function') {
+                out = await generator.impl.call(prompt, opts);
+            } else {
+                throw new Error('Unsupported pipeline implementation');
+            }
+
             return await pipelineOutputToCanvas(out);
         } catch (e) {
             log.error('Pipeline generation failed:', e?.message || e);
@@ -59,60 +184,19 @@ export async function generateImage(prompt, options = {}) {
         }
     }
 
-    if (generator.type === 'onnx') {
-        const { ort, session } = generator.impl;
-        const inputName = (session.inputNames && session.inputNames[0]) || (session.inputMetadata && Object.keys(session.inputMetadata)[0]);
-        const outputName = (session.outputNames && session.outputNames[0]) || (session.outputMetadata && Object.keys(session.outputMetadata)[0]);
-        if (!inputName) throw new Error('ONNX session input name not found');
-
-        const H = options.height || 128;
-        const W = options.width || 128;
-        const C = 4;
-        const N = 1;
-        const len = N * C * H * W;
-        const data = new Float32Array(len);
-        for (let i = 0; i < len; i++) data[i] = (Math.random() * 2.0) - 1.0;
-
-        const tensor = new ort.Tensor('float32', data, [N, C, H, W]);
-        const feeds = {};
-        feeds[inputName] = tensor;
-
-        const results = await session.run(feeds);
-        const outTensor = results[outputName] || results[Object.keys(results)[0]];
-        if (!outTensor) throw new Error('ONNX session returned no outputs');
-
-        const dims = outTensor.dims || outTensor.shape || [];
-        let outData = outTensor.data || outTensor;
-        let outH = H, outW = W, outC = 3;
-        if (dims && dims.length >= 3) {
-            if (dims.length === 4) {
-                outC = dims[1]; outH = dims[2]; outW = dims[3];
-            } else if (dims.length === 3) {
-                outC = dims[0]; outH = dims[1]; outW = dims[2];
-            }
+    if (generator.type === 'inference_api') {
+        try {
+            const impl = generator.impl || {};
+            const modelId = impl.modelId;
+            const token = impl.token;
+            const endpoint = impl.endpoint;
+            if (!token) throw new Error('HF inference token missing for inference_api backend');
+            const blob = await _hfInferenceImage(modelId, prompt, token, endpoint);
+            return await pipelineOutputToCanvas(blob);
+        } catch (e) {
+            log.error('Inference API generation failed:', e?.message || e);
+            throw e;
         }
-
-        const pixels = new Uint8ClampedArray(outW * outH * 4);
-        for (let y = 0; y < outH; y++) {
-            for (let x = 0; x < outW; x++) {
-                const idx = y * outW + x;
-                const r = getOutValue(outData, 0, outC, outH, outW, idx);
-                const g = getOutValue(outData, 1, outC, outH, outW, idx);
-                const b = getOutValue(outData, 2, outC, outH, outW, idx);
-                const base = idx * 4;
-                pixels[base] = clampTo255((r + 1) * 0.5 * 255);
-                pixels[base + 1] = clampTo255((g + 1) * 0.5 * 255);
-                pixels[base + 2] = clampTo255((b + 1) * 0.5 * 255);
-                pixels[base + 3] = 255;
-            }
-        }
-
-        const canvas = document.createElement('canvas');
-        canvas.width = outW; canvas.height = outH;
-        const ctx = canvas.getContext('2d');
-        const imageData = new ImageData(pixels, outW, outH);
-        ctx.putImageData(imageData, 0, 0);
-        return canvas;
     }
 
     throw new Error('Unknown generator backend');
@@ -161,67 +245,13 @@ async function pipelineOutputToCanvas(output) {
     throw new Error('Unsupported generator output type: ' + (res && res.constructor ? res.constructor.name : typeof res));
 }
 
-async function loadOrtRuntime() {
-    if (typeof window === 'undefined') throw new Error('ONNX runtime requires browser environment');
-    if (window.ort) return window.ort;
-
-            const CDN_WEBGL = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.webgl.min.js';
-            const CDN_WASM = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.wasm.min.js';
-
-    return new Promise((resolve, reject) => {
-        const tryLoad = (url, fallbackUrl) => {
-            const s = document.createElement('script');
-            s.src = url;
-            s.crossOrigin = 'anonymous';
-            s.onload = () => {
-                if (window.ort) return resolve(window.ort);
-                if (fallbackUrl) return tryLoad(fallbackUrl, null);
-                return reject(new Error('onnxruntime loaded but window.ort missing'));
-            };
-            s.onerror = () => {
-                if (fallbackUrl) return tryLoad(fallbackUrl, null);
-                return reject(new Error('Failed to load onnxruntime-web from CDN'));
-            };
-            document.head.appendChild(s);
-        };
-        tryLoad(CDN_WEBGL, CDN_WASM);
-    });
-}
-
-async function createOnnxSession(ort, url) {
-    if (!ort || !ort.InferenceSession) throw new Error('Invalid ONNX runtime');
-    try {
-        const session = await ort.InferenceSession.create(url);
-        return session;
-    } catch (e) {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error('Failed to fetch ONNX model: ' + res.status);
-        const ab = await res.arrayBuffer();
-        const session = await ort.InferenceSession.create(ab);
-        return session;
-    }
-}
-
-function getOutValue(data, channel, C, H, W, pixelIndex) {
-    if (!data) return 0;
-    const planeSize = H * W;
-    const index = channel * planeSize + pixelIndex;
-    return data[index] ?? 0;
-}
-
-function clampTo255(v) {
-    const n = Math.round(Math.max(0, Math.min(255, v)));
-    return n;
-}
+// Note: ONNX runtime is provided by transformers.js internals now; manual CDN loader removed.
 
 export async function disposeGenerator() {
     try {
         if (generator) {
             if (generator.type === 'pipeline' && typeof generator.impl.dispose === 'function') {
                 await generator.impl.dispose();
-            }
-            if (generator.type === 'onnx' && generator.impl && generator.impl.session && typeof generator.impl.session.dispose === 'function') {
-                try { generator.impl.session.dispose(); } catch (e) {}
             }
         }
     } catch (e) {
