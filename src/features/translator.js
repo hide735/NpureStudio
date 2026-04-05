@@ -21,7 +21,8 @@ export async function initTranslator(transformers, device = null) {
     log.info(`Initializing translator (Xenova/t5-small) on ${dev}`);
     try {
         // Allow remote models (ensure transformers.env configured by caller)
-        translator = await transformers.pipeline('translation', 'Xenova/t5-small', { device: dev });
+        const dtype = dev === 'webgpu' ? 'fp16' : 'fp32';
+        translator = await transformers.pipeline('translation', 'Xenova/t5-small', { device: dev, dtype });
         log.info('Translator pipeline loaded');
         return translator;
     } catch (err) {
